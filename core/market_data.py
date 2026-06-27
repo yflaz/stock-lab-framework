@@ -110,6 +110,21 @@ def fetch_tencent_a_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]
     return quotes, health
 
 
+def fetch_a_share_quote(symbol: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    digits = symbol_digits(symbol)
+    if not digits:
+        return {}, {"source": "A-share quote", "ok": False, "message": "missing symbol"}
+    tencent_quotes, tencent_health = fetch_tencent_a_quotes([digits])
+    if digits in tencent_quotes:
+        return tencent_quotes[digits], tencent_health
+    ak_quotes, ak_health = fetch_akshare_a_quotes([digits])
+    if digits in ak_quotes:
+        if tencent_health.get("message"):
+            ak_health["message"] = f"Tencent failed first: {tencent_health.get('message')}"
+        return ak_quotes[digits], ak_health
+    return {}, ak_health if ak_health.get("message") else tencent_health
+
+
 def fetch_a_share_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     quotes, health = fetch_akshare_a_quotes(symbols)
     if quotes:

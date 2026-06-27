@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .market_data import fetch_a_share_quotes
+from .market_data import fetch_a_share_quote
 from .utils import round2, safe_float
 
 
@@ -214,8 +214,7 @@ def analyze_a_share_stock(symbol: str) -> dict[str, Any]:
     if len(digits) != 6:
         raise ValueError("symbol must be a 6-digit A-share code")
 
-    quotes, quote_health = fetch_a_share_quotes([digits])
-    quote = quotes.get(digits) or {}
+    quote, quote_health = fetch_a_share_quote(digits)
 
     ak = _safe_import_akshare()
     hist = ak.stock_zh_a_hist_tx(symbol=_symbol_for_hist(digits), start_date="20260101", end_date="20261231", adjust="qfq")

@@ -51,17 +51,11 @@
     "candidate_source": "watchlist",
     "max_candidates_per_market": 12,
     "target_markets": ["A", "HK", "US"],
-    "focus_themes": ["Technology", "Healthcare", "Industrials", "Energy", "Consumer", "Financials", "Index/ETF"]
+    "focus_themes": []
   },
   "watchlists": {
-    "A": [
-      {"symbol": "510300", "name": "CSI 300 ETF", "theme": "Index/ETF"}
-    ],
-    "HK": [
-      {"symbol": "2800.HK", "name": "Tracker Fund of Hong Kong", "theme": "Index/ETF"}
-    ],
-    "US": [
-      {"symbol": "SPY", "name": "SPDR S&P 500 ETF", "theme": "Index/ETF"}
-    ]
+    "A": [],
+    "HK": [],
+    "US": []
   }
 }
