@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config.json
+*.backup.*
+
+# runtime state / local research artifacts
+simulation_state.json
+sector_summary.json
+LEARNING.md
+strategy_journal/
+
+# local OS/editor noise
+.DS_Store
+.vscode/
+.idea/

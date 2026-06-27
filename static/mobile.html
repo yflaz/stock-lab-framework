@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Stock Lab Mobile</title>
+  <link rel="stylesheet" href="/static/mobile.css" />
+</head>
+<body>
+  <main class="mobile-shell">
+    <header class="mobile-top">
+      <div>
+        <div class="app-name">Stock Lab</div>
+        <div class="app-meta" id="mobileMeta"></div>
+      </div>
+      <button class="refresh-button" id="mobileRefresh">刷新</button>
+    </header>
+
+    <section class="control-strip">
+      <div class="segmented" id="mobileAccounts"></div>
+      <div class="chip-row" id="mobileMarkets"></div>
+      <input class="mobile-search" id="mobileSearch" placeholder="搜索股票 / 主题" />
+    </section>
+
+    <section id="mobileContent" class="mobile-content"></section>
+  </main>
+
+  <nav class="bottom-nav" id="bottomNav">
+    <button data-tab="home" class="active">主页</button>
+    <button data-tab="pending">待定</button>
+    <button data-tab="profit">收益</button>
+    <button data-tab="thought">思考</button>
+    <button data-tab="stock">个股</button>
+  </nav>
+
+  <script src="/static/mobile_app.js"></script>
+</body>
+</html>
+

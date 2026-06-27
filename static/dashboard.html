@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stock Lab New</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">SL</div>
+      <div>
+        <div class="brand-title">Stock Lab New</div>
+        <div class="brand-sub" id="metaLine"></div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <label class="field">
+        <span>账户</span>
+        <select id="accountSelect"></select>
+      </label>
+      <label class="field">
+        <span>市场</span>
+        <select id="marketSelect">
+          <option value="ALL">全部</option>
+          <option value="A">A股</option>
+          <option value="HK">港股</option>
+          <option value="US">美股</option>
+        </select>
+      </label>
+      <label class="field search-field">
+        <span>搜索</span>
+        <input id="searchInput" placeholder="代码 / 名称 / 主题" />
+      </label>
+      <button class="icon-btn" id="refreshBtn" title="刷新状态">Refresh</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="metrics" id="metrics"></section>
+
+    <section class="grid-main">
+      <div class="stack">
+        <section class="panel" id="disciplinePanel"></section>
+        <section class="panel" id="positionsPanel"></section>
+        <section class="panel" id="ordersPanel"></section>
+      </div>
+
+      <aside class="stack">
+        <section class="panel" id="decisionPanel"></section>
+        <section class="panel" id="committeePanel"></section>
+        <section class="panel" id="marketPanel"></section>
+      </aside>
+    </section>
+
+    <section class="panel" id="journalPanel"></section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

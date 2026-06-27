@@ -1,0 +1,67 @@
+{
+  "system_name": "Stock Lab",
+  "execution_mode": "paper",
+  "active_account_id": "a-share-paper",
+  "daily_trade_limit": 4,
+  "auto_enter_paper_positions": true,
+  "accounts": [
+    {
+      "id": "a-share-paper",
+      "label": "A-share paper account",
+      "market": "A",
+      "currency": "CNY",
+      "initial_cash": 50000
+    },
+    {
+      "id": "hk-paper",
+      "label": "Hong Kong paper account",
+      "market": "HK",
+      "currency": "HKD",
+      "initial_cash": 50000
+    },
+    {
+      "id": "us-paper",
+      "label": "US paper account",
+      "market": "US",
+      "currency": "USD",
+      "initial_cash": 20000
+    }
+  ],
+  "api_keys": {
+    "twelve_data": "",
+    "alpha_vantage": "",
+    "finnhub": "",
+    "news_api": "",
+    "fred": ""
+  },
+  "risk": {
+    "max_position_pct": 0.25,
+    "max_theme_pct": 0.45,
+    "min_cash_pct": 0.1,
+    "hard_stop_enabled": true,
+    "take_profit_enabled": true,
+    "take_profit_fraction": 0.5,
+    "trailing_activation_pct": 8.0,
+    "trailing_drawdown_pct": 4.0,
+    "time_stop_days": 5,
+    "time_stop_min_pnl_pct": -2.5,
+    "volatility_shock_pct": -5.0
+  },
+  "strategy": {
+    "candidate_source": "watchlist",
+    "max_candidates_per_market": 12,
+    "target_markets": ["A", "HK", "US"],
+    "focus_themes": ["Technology", "Healthcare", "Industrials", "Energy", "Consumer", "Financials", "Index/ETF"]
+  },
+  "watchlists": {
+    "A": [
+      {"symbol": "510300", "name": "CSI 300 ETF", "theme": "Index/ETF"}
+    ],
+    "HK": [
+      {"symbol": "2800.HK", "name": "Tracker Fund of Hong Kong", "theme": "Index/ETF"}
+    ],
+    "US": [
+      {"symbol": "SPY", "name": "SPDR S&P 500 ETF", "theme": "Index/ETF"}
+    ]
+  }
+}
