@@ -57,6 +57,38 @@
 - 想把“持仓、复盘、理由、异动、个股分析”放在一个统一界面里的人
 - 想让自己的 agent 帮忙改配置、接数据源、调 UI、写策略规则的人
 
+## Screenshots
+
+### Desktop dashboard
+
+<img src="./docs/screenshots/dashboard-overview.png" alt="Stock Lab desktop dashboard overview" width="100%" />
+
+### Mobile dashboard
+
+<img src="./docs/screenshots/mobile-home.png" alt="Stock Lab mobile dashboard overview" width="380" />
+
+## 典型使用场景
+
+### 1. 盘前准备
+- 看 watchlist、候选标的、优先级和风险约束
+- 先明确今天重点看什么，而不是开盘后临时乱切
+
+### 2. 盘中看持仓与动作
+- 通过持仓详情、账户状态、今日实际动作快速判断系统当前处于什么状态
+- 区分“已经执行了什么”和“只是正在观察什么”
+
+### 3. 收盘后做 nightly review
+- 回看当天动作、纪律执行、思路变化与次日关注点
+- 把执行结果和复盘过程沉淀成可追踪记录
+
+### 4. 单只股票快速查询
+- 输入六位 A 股代码，快速查看规则化个股分析
+- 适合临时想看某只股票是否有异动、是否接近关键位、是否值得继续跟踪
+
+### 5. 交给自己的 agent 做二次开发
+- 让 agent 帮你改配置、接数据源、换 UI、加风控规则、改策略逻辑
+- 这个 public repo 的定位就是 framework：你带自己的策略与偏好，它负责提供底座
+
 ## 目录结构
 
 ```text
