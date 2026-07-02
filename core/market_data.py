@@ -3,15 +3,38 @@ from __future__ import annotations
 import json
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from typing import Any
 
 from .utils import pct_change, round2, safe_float, symbol_digits
+
+
+DEFAULT_NEWS_FEEDS = [
+    {
+        "name": "Google News A股",
+        "url": "https://news.google.com/rss/search?q=A%E8%82%A1+%E5%8D%8A%E5%AF%BC%E4%BD%93+OR+AI+OR+%E5%88%B8%E5%95%86+when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    },
+    {
+        "name": "Google News 港美股",
+        "url": "https://news.google.com/rss/search?q=Hong+Kong+stocks+OR+Nasdaq+OR+S%26P+500+when:1d&hl=en-US&gl=US&ceid=US:en",
+    },
+    {
+        "name": "Google News 宏观",
+        "url": "https://news.google.com/rss/search?q=Federal+Reserve+OR+US+Treasury+yield+OR+oil+when:1d&hl=en-US&gl=US&ceid=US:en",
+    },
+]
 
 
 def fetch_json_url(url: str, timeout: int = 8) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 StockLabNew/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+
+def fetch_text_url(url: str, timeout: int = 8, encoding: str = "utf-8") -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 StockLabNew/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode(encoding, errors="ignore")
 
 
 def quote_symbol_for_tencent(symbol: str) -> str:
@@ -108,21 +131,6 @@ def fetch_tencent_a_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]
     if not quotes:
         health.update({"ok": False, "message": "Tencent quote returned no usable rows"})
     return quotes, health
-
-
-def fetch_a_share_quote(symbol: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    digits = symbol_digits(symbol)
-    if not digits:
-        return {}, {"source": "A-share quote", "ok": False, "message": "missing symbol"}
-    tencent_quotes, tencent_health = fetch_tencent_a_quotes([digits])
-    if digits in tencent_quotes:
-        return tencent_quotes[digits], tencent_health
-    ak_quotes, ak_health = fetch_akshare_a_quotes([digits])
-    if digits in ak_quotes:
-        if tencent_health.get("message"):
-            ak_health["message"] = f"Tencent failed first: {tencent_health.get('message')}"
-        return ak_quotes[digits], ak_health
-    return {}, ak_health if ak_health.get("message") else tencent_health
 
 
 def fetch_a_share_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -260,61 +268,45 @@ def fetch_global_quotes(symbols: list[str], market: str, api_keys: dict[str, str
     return {}, yahoo_health if yahoo_health.get("message") else health
 
 
-def fetch_news_and_macro(api_keys: dict[str, str]) -> dict[str, Any]:
+def fetch_news_and_macro(config: dict[str, Any]) -> dict[str, Any]:
     headlines: list[dict[str, str]] = []
     data_health: list[dict[str, Any]] = []
-    news_key = api_keys.get("news_api", "")
-    if news_key:
-        query = urllib.parse.urlencode(
-            {
-                "q": "China A-share OR Hong Kong stocks OR Nasdaq OR AI chips OR Federal Reserve",
-                "language": "en",
-                "pageSize": 6,
-                "sortBy": "publishedAt",
-                "apiKey": news_key,
-            }
-        )
+    feeds = (config.get("news_feeds") or DEFAULT_NEWS_FEEDS)[:6]
+    seen_titles: set[str] = set()
+    for feed in feeds:
+        name = str(feed.get("name") or "RSS")
+        url = str(feed.get("url") or "").strip()
+        if not url:
+            continue
         try:
-            data = fetch_json_url(f"https://newsapi.org/v2/everything?{query}", timeout=8)
-            for article in (data.get("articles") or [])[:6]:
-                title = str(article.get("title") or "").strip()
-                if title:
-                    headlines.append(
-                        {
-                            "title": title,
-                            "source": ((article.get("source") or {}).get("name")) or "NewsAPI",
-                            "url": article.get("url") or "",
-                        }
-                    )
-            data_health.append({"source": "NewsAPI", "ok": True, "message": ""})
+            xml_text = fetch_text_url(url, timeout=8)
+            root = ET.fromstring(xml_text)
+            item_count = 0
+            for item in root.findall(".//item"):
+                title = str(item.findtext("title") or "").strip()
+                link = str(item.findtext("link") or "").strip()
+                pub_date = str(item.findtext("pubDate") or "").strip()
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                headlines.append(
+                    {
+                        "title": title,
+                        "source": name,
+                        "url": link,
+                        "published_at": pub_date,
+                    }
+                )
+                item_count += 1
+                if item_count >= 4 or len(headlines) >= 10:
+                    break
+            data_health.append({"source": name, "ok": item_count > 0, "message": "" if item_count > 0 else "RSS empty"})
         except Exception as exc:
-            data_health.append({"source": "NewsAPI", "ok": False, "message": str(exc)})
-    else:
-        data_health.append({"source": "NewsAPI", "ok": False, "message": "NEWS_API_KEY is not configured"})
+            data_health.append({"source": name, "ok": False, "message": str(exc)})
+        if len(headlines) >= 10:
+            break
 
-    macro: list[dict[str, Any]] = []
-    fred_key = api_keys.get("fred", "")
-    if fred_key:
-        for series_id, label in [("DGS10", "美国10年期国债收益率"), ("DEXCHUS", "美元兑人民币")]:
-            query = urllib.parse.urlencode(
-                {
-                    "series_id": series_id,
-                    "api_key": fred_key,
-                    "file_type": "json",
-                    "sort_order": "desc",
-                    "limit": 1,
-                }
-            )
-            try:
-                data = fetch_json_url(f"https://api.stlouisfed.org/fred/series/observations?{query}", timeout=8)
-                obs = (data.get("observations") or [{}])[0]
-                macro.append({"name": label, "value": obs.get("value"), "date": obs.get("date"), "source": "FRED"})
-            except Exception as exc:
-                data_health.append({"source": f"FRED:{series_id}", "ok": False, "message": str(exc)})
-    else:
-        data_health.append({"source": "FRED", "ok": False, "message": "FRED_API_KEY is not configured"})
-
-    return {"headlines": headlines, "macro": macro, "data_health": data_health}
+    return {"headlines": headlines[:10], "macro": [], "data_health": data_health}
 
 
 def collect_market_quotes(config: dict[str, Any], previous_state: dict[str, Any]) -> dict[str, Any]:
@@ -352,7 +344,7 @@ def collect_market_quotes(config: dict[str, Any], previous_state: dict[str, Any]
             if quote.get("market") == market or symbol in symbols
         }
 
-    external = fetch_news_and_macro(api_keys)
+    external = fetch_news_and_macro(config)
     health.extend(external.get("data_health") or [])
     return {
         "quotes": quotes_by_market,

@@ -160,6 +160,18 @@ button, input { font: inherit; }
   margin-bottom: 9px;
 }
 
+.section-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.section-side {
+  flex: 0 1 min(58%, 240px);
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .section-title { font-size: 16px; font-weight: 850; line-height: 1.3; }
 .section-sub { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 
@@ -191,7 +203,10 @@ button, input { font: inherit; }
   border: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: right;
+  max-width: 100%;
 }
 
 .tag.good { color: var(--gain); border-color: rgba(200, 49, 43, 0.25); background: rgba(200, 49, 43, 0.07); }
@@ -203,6 +218,9 @@ button, input { font: inherit; }
 .loss { color: var(--loss); }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.change-text { color: var(--gain); font-weight: 700; }
+.change-note { margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: rgba(212, 63, 58, 0.08); border: 1px solid rgba(212, 63, 58, 0.14); }
+.stock-card .collapse-brief .change-text { color: var(--gain); font-weight: 700; }
 
 .stock-card {
   border-top: 1px solid var(--line);

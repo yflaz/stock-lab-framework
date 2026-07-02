@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from core.config import load_config
 from core.state_builder import initial_state, save_current_state
-from core.state_store import SECTOR_PATH, STATE_PATH, load_json
+from core.state_store import SECTOR_PATH, STATE_PATH, load_json, sanitize_json_payload
 from core.stock_analysis import analyze_a_share_stock
 
 ROOT = Path(__file__).resolve().parent
@@ -47,7 +47,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
     def _send_json(self, payload: dict | list, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(sanitize_json_payload(payload), ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -72,13 +72,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         if path == "/api/health":
-            return self._send_json({"ok": True, "service": "stock-lab-new"})
+            return self._send_json({"ok": True, "service": "stock-lab-v2.0"})
         if path == "/api/state":
             return self._send_json(load_state_payload(refresh=query.get("refresh") == ["1"]))
         if path == "/api/analyze_stock":
             symbol = str((query.get("symbol") or [""])[0]).strip()
+            detailed_raw = str((query.get("detailed") or [""])[0]).strip().lower()
+            detailed = detailed_raw in {"1", "true", "yes", "on"}
             try:
-                return self._send_json(analyze_a_share_stock(symbol))
+                return self._send_json(analyze_a_share_stock(symbol, detailed=detailed))
             except ValueError as exc:
                 return self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:
@@ -108,7 +110,7 @@ def main() -> None:
             print(f"Port {port} is already in use. Set STOCK_LAB_PORT to another value.")
             raise SystemExit(2)
         raise
-    print(f"Stock Lab New dashboard serving on http://127.0.0.1:{port}/dashboard")
+    print(f"Stock Lab v2.0 dashboard serving on http://127.0.0.1:{port}/dashboard")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

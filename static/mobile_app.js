@@ -7,6 +7,7 @@ let stockInput = "";
 let stockAnalysis = null;
 let stockAnalysisError = "";
 let stockLoading = false;
+let stockDetailed = false;
 
 const $ = (id) => document.getElementById(id);
 const num = (v) => Number(v || 0);
@@ -39,8 +40,13 @@ function list(items) {
   return clean.length ? `<ul class="list">${clean.map((x) => `<li>${x}</li>`).join("")}</ul>` : "";
 }
 
+function changeList(items) {
+  const clean = (items || []).filter(Boolean);
+  return clean.length ? `<ul class="list">${clean.map((x) => `<li class="change-text">${x}</li>`).join("")}</ul>` : "";
+}
+
 function card(title, sub, right, body) {
-  return `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">${title}</div>${sub ? `<div class="section-sub">${sub}</div>` : ""}</div>${right || ""}</div>${body || ""}</div></section>`;
+  return `<section class="card"><div class="card-pad"><div class="section-head"><div class="section-main"><div class="section-title">${title}</div>${sub ? `<div class="section-sub">${sub}</div>` : ""}</div>${right ? `<div class="section-side">${right}</div>` : ""}</div>${body || ""}</div></section>`;
 }
 
 function rowsFor(key) {
@@ -95,6 +101,7 @@ function kpiGrid(items) {
 
 function stockCard(p) {
   const monitor = (STATE.position_monitor || []).find((x) => x.symbol === p.symbol && x.account_id === p.account_id) || {};
+  const review = (STATE.learning_center?.position_reviews || []).find((x) => x.symbol === p.symbol) || {};
   return `<details class="stock-card collapsible-card">
     <summary class="collapse-summary">
       <div class="stock-head">
@@ -105,8 +112,8 @@ function stockCard(p) {
       </div>
       <div class="collapse-brief">
         <span>现价 ${money(p.latest_price)}</span>
-        <span>止损 ${money(p.stop_loss)}</span>
-        <span>目标 ${money(p.target_price)}</span>
+        <span class="${review.changed_fields?.stop_loss ? "change-text" : ""}">止损 ${money(p.stop_loss)}</span>
+        <span class="${review.changed_fields?.target_price ? "change-text" : ""}">目标 ${money(p.target_price)}</span>
       </div>
     </summary>
     <div class="collapse-content">
@@ -115,9 +122,10 @@ function stockCard(p) {
         <div class="detail"><div class="k">成本</div><div class="v">${money(p.cost_price)}</div></div>
         <div class="detail"><div class="k">现价</div><div class="v">${money(p.latest_price)}</div></div>
         <div class="detail"><div class="k">市值</div><div class="v">${money(p.market_value)}</div></div>
-        <div class="detail"><div class="k">止损</div><div class="v">${money(p.stop_loss)}</div></div>
-        <div class="detail"><div class="k">目标</div><div class="v">${money(p.target_price)}</div></div>
+        <div class="detail"><div class="k">止损</div><div class="v ${review.changed_fields?.stop_loss ? "change-text" : ""}">${money(p.stop_loss)}</div></div>
+        <div class="detail"><div class="k">目标</div><div class="v ${review.changed_fields?.target_price ? "change-text" : ""}">${money(p.target_price)}</div></div>
       </div>
+      ${review.changes?.length ? `<div class="stock-note change-note"><strong>今天改过的参数</strong>${changeList(review.changes.map((x) => x.text))}</div>` : ""}
       ${monitor.reason ? `<div class="stock-note">${tag(monitor.status, monitor.severity === "pass" ? "info" : "warn")} ${monitor.reason}</div>` : ""}
     </div>
   </details>`;
@@ -174,6 +182,17 @@ function orderCard(o, expanded = false) {
   </details>`;
 }
 
+function renderHomeDigestCard() {
+  const digest = STATE.home_digest || {};
+  const metrics = (digest.summary_items || []).map((item) => [item.label, String(item.value ?? 0), item.note || "", item.kind === "good" ? "gain" : ""]);
+  return card(
+    "今日总览",
+    "首页只保留精简摘要",
+    tag(digest.headline || "今日概览", "info"),
+    `${metrics.length ? kpiGrid(metrics) : '<div class="empty">今日总览暂未生成，先看思考页。</div>'}`
+  );
+}
+
 function renderHome() {
   const a = account();
   const analytics = STATE.account_analytics?.[accountId] || {};
@@ -182,6 +201,7 @@ function renderHome() {
   const direct = orders.filter((x) => x.committee_action === "direct_follow");
   const discipline = (STATE.discipline_summary?.queue || []).filter((x) => x.account_id === accountId && x.severity !== "pass");
   return [
+    renderHomeDigestCard(),
     card("账户概览", a.label || "", tag(STATE.meta?.session_phase_label || "", "info"), kpiGrid([
       ["权益", money(a.equity), `收益率 ${pct(analytics.return_pct)}`],
       ["今日", money(analytics.today_pnl), "按持仓最新价", signClass(analytics.today_pnl)],
@@ -254,9 +274,14 @@ function renderPnlRows(title, rows, kind) {
 
 function renderThought() {
   const thought = STATE.thought_process || {};
+  const digest = STATE.home_digest || {};
+  const highlights = (digest.action_lines || []).slice(0, 4);
+  const headlines = (digest.headline_hits || []).slice(0, 3);
   return [
     card("本轮总判断", thought.headline || "", tag(STATE.decision_latest?.phase_label || ""), list(STATE.decision_latest?.checks)),
-    `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">思考链路</div><div class="section-sub">从数据、纪律、组合、候选到动作</div></div></div><div class="timeline">${(thought.stages || []).map((s) => `<div class="stage"><div class="stage-title"><div><div class="stock-name">${s.name}</div><div class="stock-note">${s.summary || ""}</div></div>${tag(s.status || "", s.status && String(s.status).includes("正常") ? "info" : "warn")}</div>${list(s.details)}</div>`).join("")}</div></div></section>`,
+    highlights.length ? card("今天改了什么", "首页已隐藏，改到思考页集中看", tag(`${highlights.length} 条`, "good"), changeList(highlights)) : "",
+    headlines.length ? card("命中线索", "只保留和持仓/观察股直接相关的外部线索", tag(`${headlines.length} 条`, "info"), headlines.map((item) => `<div class="stock-card"><div class="stock-name">${item.title || ""}</div><div class="stock-code">${item.source || ""} · ${((item.matched_themes || []).join(" / ")) || "未归类"}</div><div class="collapse-brief">${(item.related_positions || []).map((x) => `<span class="change-text">持仓 ${x.name || x.symbol}</span>`).join("")}${(item.related_watchlist || []).map((x) => `<span>观察 ${x.name || x.symbol}</span>`).join("")}</div></div>`).join("")) : "",
+    `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">思考链路</div><div class="section-sub">只展示会影响动作的判断与改动</div></div></div><div class="timeline">${(thought.stages || []).map((s) => `<div class="stage"><div class="stage-title"><div><div class="stock-name">${s.name}</div><div class="stock-note">${s.summary || ""}</div></div>${tag(s.status || "", s.name === "纪律门" || s.name === "组合风险" ? "good" : (s.status && String(s.status).includes("直接") ? "warn" : "info"))}</div>${s.name === "纪律门" || s.name === "组合风险" ? changeList(s.details) : list(s.details)}</div>`).join("")}</div></div></section>`,
     `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">候选拆解</div><div class="section-sub">每只票对应多角色审议</div></div></div></div>${(thought.top_reviews || []).filter(rowMatchesLoose).slice(0, 8).map(reviewCard).join("") || '<div class="empty">暂无审议</div>'}</section>`,
     renderLearning(),
   ].join("");
@@ -270,11 +295,28 @@ function rowMatchesLoose(item) {
 }
 
 function reviewCard(r) {
-  return `<div class="stock-card">
-    <div class="stock-head"><div><div class="stock-name">${r.name || r.symbol}</div><div class="stock-code mono">${r.symbol} · ${r.conviction || ""}</div></div>${tag(r.action || "", r.action === "direct_follow" ? "good" : r.action === "avoid_for_now" ? "bad" : "warn")}</div>
-    ${list(r.debate)}
-    <div class="agent-grid">${(r.agents || []).filter(Boolean).map((a) => `<div class="agent"><div class="name">${agentName(a)} ${tag(a.verdict || a.action || "", a.verdict === "pass" || a.verdict === "positive" ? "info" : a.verdict === "avoid" ? "bad" : "warn")}</div><div class="text">${a.summary || ""}</div></div>`).join("")}</div>
-  </div>`;
+  const action = r.action || "";
+  const actionKind = action === "direct_follow" ? "good" : action === "avoid_for_now" ? "bad" : "warn";
+  return `<details class="stock-card collapsible-card">
+    <summary class="collapse-summary">
+      <div class="stock-head">
+        <div>
+          <div class="stock-name">${r.name || r.symbol}</div>
+          <div class="stock-code mono">${r.symbol} · ${r.conviction || ""}</div>
+        </div>
+        <div class="collapse-side">
+          ${tag(action, actionKind)}
+        </div>
+      </div>
+      <div class="collapse-brief">
+        <span>${(r.debate || [])[0] || '点开看详细审议'}</span>
+      </div>
+    </summary>
+    <div class="collapse-content">
+      ${r.debate?.length ? `<div class="stock-note"><strong>审议结论</strong>${list(r.debate)}</div>` : ""}
+      <div class="agent-grid">${(r.agents || []).filter(Boolean).map((a) => `<div class="agent"><div class="name">${agentName(a)} ${tag(a.verdict || a.action || "", a.verdict === "pass" || a.verdict === "positive" ? "info" : a.verdict === "avoid" ? "bad" : "warn")}</div><div class="text">${a.summary || ""}</div></div>`).join("")}</div>
+    </div>
+  </details>`;
 }
 
 function agentName(agent) {
@@ -290,15 +332,16 @@ function agentName(agent) {
 function renderLearning() {
   const learning = STATE.learning_center || {};
   return [
+    learning.rule_changes?.length ? card("今天改过的规则", "跟昨天不一样才标红", tag(`${learning.rule_changes.length} 项`, "good"), changeList(learning.rule_changes.map((x) => x.text || x))) : "",
     card("稳定规则", "", tag(`${(learning.stable_rules || []).length} 条`, "info"), list(learning.stable_rules)),
     card("复盘问题", "", tag("Review", "warn"), list(learning.today_review_questions)),
-    card("过程记录", "", "", list(learning.process_lessons)),
     `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">最近记录</div></div>${tag(`${(learning.recent_decisions || []).length} 条`)}</div></div>${(learning.recent_decisions || []).slice(0, 10).map((d) => `<div class="stock-card"><div class="stock-head"><div><div class="stock-name">${d.phase_label || d.phase}</div><div class="stock-code">${d.timestamp || ""}</div></div>${tag(d.date || "")}</div><div class="stock-note">${d.summary || ""}</div></div>`).join("")}</section>`,
   ].join("");
 }
 
 function holdingAnalysisCard(p) {
   const monitor = (STATE.position_monitor || []).find((x) => x.symbol === p.symbol && x.account_id === p.account_id) || {};
+  const review = (STATE.learning_center?.position_reviews || []).find((x) => x.symbol === p.symbol) || {};
   return `<details class="stock-card collapsible-card">
     <summary class="collapse-summary">
       <div class="stock-head">
@@ -307,14 +350,14 @@ function holdingAnalysisCard(p) {
           <div class="stock-code mono">${p.symbol} · ${p.theme || ""} · ${p.market}</div>
         </div>
         <div class="collapse-side">
-          ${tag(monitor.status || "持有中", monitor.severity === "pass" ? "info" : "warn")}
+          ${tag(review.action_bias || monitor.status || "持有中", monitor.severity === "pass" ? "info" : "warn")}
           <div class="stock-price ${signClass(p.unrealized_pnl)}">${money(p.unrealized_pnl)}<div class="stock-code">${pct(p.unrealized_pnl_pct)}</div></div>
         </div>
       </div>
       <div class="collapse-brief">
         <span>现价 ${money(p.latest_price)}</span>
-        <span>止损 ${money(p.stop_loss)}</span>
-        <span>目标 ${money(p.target_price)}</span>
+        <span class="${review.changed_fields?.stop_loss ? "change-text" : ""}">止损 ${money(p.stop_loss)}</span>
+        <span class="${review.changed_fields?.target_price ? "change-text" : ""}">目标 ${money(p.target_price)}</span>
       </div>
     </summary>
     <div class="collapse-content">
@@ -322,13 +365,17 @@ function holdingAnalysisCard(p) {
         <div class="detail"><div class="k">成本 / 现价</div><div class="v">${money(p.cost_price)}<br>${money(p.latest_price)}</div></div>
         <div class="detail"><div class="k">浮盈亏</div><div class="v ${signClass(p.unrealized_pnl)}">${money(p.unrealized_pnl)}<br>${pct(p.unrealized_pnl_pct)}</div></div>
         <div class="detail"><div class="k">今日波动</div><div class="v ${signClass(p.today_pnl)}">${money(p.today_pnl)}<br>${pct(p.today_pnl_pct)}</div></div>
-        <div class="detail"><div class="k">止损</div><div class="v">${money(p.stop_loss)}</div></div>
-        <div class="detail"><div class="k">目标</div><div class="v">${money(p.target_price)}</div></div>
+        <div class="detail"><div class="k">止损</div><div class="v ${review.changed_fields?.stop_loss ? "change-text" : ""}">${money(p.stop_loss)}</div></div>
+        <div class="detail"><div class="k">目标</div><div class="v ${review.changed_fields?.target_price ? "change-text" : ""}">${money(p.target_price)}</div></div>
         <div class="detail"><div class="k">仓位意图</div><div class="v">${pct(p.target_position_pct || 0)}</div></div>
       </div>
+      ${review.summary ? `<div class="stock-note"><strong>今日判断：</strong>${review.summary}</div>` : ""}
+      ${review.what_if ? `<div class="stock-note"><strong>如果今天动作更主动：</strong>${review.what_if}</div>` : ""}
+      ${review.changes?.length ? `<div class="stock-note change-note"><strong>今天改过的参数</strong>${changeList(review.changes.map((x) => x.text))}</div>` : ""}
+      ${review.lessons?.length ? `<div class="stock-note"><strong>为什么这么看</strong>${list(review.lessons)}</div>` : ""}
       <div class="stock-note"><strong>持有逻辑</strong>${list(p.holding_thesis)}</div>
       ${monitor.reason ? `<div class="stock-note"><strong>跟踪结论：</strong>${monitor.reason}${list(monitor.bullets)}</div>` : ""}
-      ${p.invalidation ? `<div class="stock-note"><strong>失效条件：</strong>${p.invalidation}</div>` : ""}
+      ${p.invalidation ? `<div class="stock-note ${review.changed_fields?.invalidation ? "change-text" : ""}"><strong>失效条件：</strong>${p.invalidation}</div>` : ""}
     </div>
   </details>`;
 }
@@ -427,6 +474,18 @@ function renderStockAnalysisResult() {
           <div class="detail"><div class="k">阻力 / 止盈</div><div class="v">${money(a.levels?.resistance)}<br>${money(a.levels?.take_profit)}</div></div>
         </div>
         <div class="stock-note"><strong>分析结论</strong>${list(a.analysis)}</div>
+        ${a.detailed_report ? `
+          <div class="stock-note"><strong>详细总览</strong>${list(a.detailed_report.overview)}</div>
+          <div class="stock-note"><strong>思路拆解</strong>${list(a.detailed_report.thesis)}</div>
+          <div class="stock-note"><strong>现实新闻</strong>${list(a.detailed_report.news || [])}</div>
+          <div class="stock-note"><strong>操作计划</strong>${list(a.detailed_report.action_plan)}</div>
+          <div class="stock-note"><strong>主要风险</strong>${list(a.detailed_report.risk_focus)}</div>
+          ${a.detailed_report.signals?.length ? `<div class="stock-note"><strong>异动构成</strong>${list(a.detailed_report.signals)}</div>` : ""}
+        ` : ""}
+        ${!a.detailed_report ? `<div class="stock-note"><strong>现实新闻</strong>${a.news_context?.has_hits ? list((a.news_context.items || []).slice(0, 3).map((item) => {
+          const final = item.news_analysis?.final || {};
+          return `${item.title || ''}｜${final.sentiment || 'neutral'}｜影响分 ${final.impact_score || 0}/5｜${final.action_hint || '继续观察'}`;
+        })) : '当前未命中与该股直接相关的实时新闻，暂按量价结构为主。'}</div>` : ""}
         <div class="section-head stock-alert-head"><div><div class="section-title">异动预警</div></div>${tag(`${a.status?.triggered_count || 0}/${a.status?.total_checks || 0} 项`, a.status?.triggered_count >= 2 ? "warn" : "info")}</div>
         ${(a.alerts || []).map(renderAlertRow).join("")}
       </div>
@@ -445,6 +504,10 @@ function renderStockTab() {
         <input id="stockCodeInput" class="mobile-search mono" placeholder="例如 600584" value="${stockInput}" maxlength="6" inputmode="numeric" />
         <button id="analyzeBtn" class="primary-button">开始分析</button>
       </div>
+      <label class="stock-note" style="display:block;margin:8px 0 0;">
+        <input id="stockDetailedToggle" type="checkbox" ${stockDetailed ? "checked" : ""} />
+        加入详细分析（默认日常用简版，勾选后输出更完整个股报告）
+      </label>
       ${renderStockAnalysisResult()}
     `),
   ].join("");
@@ -453,6 +516,7 @@ function renderStockTab() {
 function bindStockActions() {
   const input = $("stockCodeInput");
   const btn = $("analyzeBtn");
+  const detailedToggle = $("stockDetailedToggle");
   if (!input || !btn) return;
   input.oninput = (event) => {
     stockInput = String(event.target.value || "").replace(/\D/g, "").slice(0, 6);
@@ -461,6 +525,11 @@ function bindStockActions() {
   input.onkeydown = (event) => {
     if (event.key === "Enter") requestStockAnalysis();
   };
+  if (detailedToggle) {
+    detailedToggle.onchange = (event) => {
+      stockDetailed = Boolean(event.target.checked);
+    };
+  }
   btn.onclick = () => requestStockAnalysis();
 }
 
@@ -476,7 +545,7 @@ async function requestStockAnalysis() {
   stockAnalysisError = "";
   render();
   try {
-    const res = await fetch(`/api/analyze_stock?symbol=${encodeURIComponent(stockInput)}`, { cache: "no-store" });
+    const res = await fetch(`/api/analyze_stock?symbol=${encodeURIComponent(stockInput)}&detailed=${stockDetailed ? "1" : "0"}`, { cache: "no-store" });
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || `analyze ${res.status}`);
     stockAnalysis = data;

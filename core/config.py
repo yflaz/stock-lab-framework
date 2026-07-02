@@ -9,7 +9,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "system_name": "Stock Lab New",
+    "system_name": "Stock Lab v2.0",
     "timezone": "Asia/Shanghai",
     "execution_mode": "paper",
     "active_account_id": "a-share-paper",
@@ -56,6 +56,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "time_stop_days": 5,
         "time_stop_min_pnl_pct": -2.5,
         "volatility_shock_pct": -5.0,
+        "opportunity_review_days": 2,
+        "opportunity_min_score_gap": 5.0,
+        "opportunity_min_expected_return_gap_pct": 2.5,
+        "rotation_min_candidate_score": 80.0,
+        "rotation_max_hold_pnl_pct": 9.0,
+        "rotation_underperform_pct": 3.0,
+        "active_trim_hold_days": 2,
+        "active_trim_min_score_gap": 4.0,
+        "active_trim_min_expected_return_gap_pct": 2.0,
     },
     "fees": {
         "commission_rate": 0.00025,
@@ -66,7 +75,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "strategy": {
         "candidate_source": "watchlist",
         "max_candidates_per_market": 12,
+        "max_total_candidates": 18,
         "target_markets": ["A", "HK", "US"],
+        "technical_trading_mode": "rotation_first",
+        "screening": {
+            "min_score": 68.0,
+            "min_expected_return_pct": 5.0,
+            "max_heat_change_pct": 8.5,
+            "prefer_pullback_near_entry": True,
+            "focus_theme_bonus": 8.0,
+            "non_focus_theme_bonus": 2.0,
+        },
+        "cash_management": {
+            "soft_cash_floor_pct": 0.18,
+            "ideal_cash_floor_pct": 0.25,
+            "allow_rotation_when_better_setup": True,
+        },
         "focus_themes": [
             "Technology",
             "Healthcare",
@@ -87,6 +111,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "A": [],
         "HK": [],
         "US": [],
+    },
+    "news_analysis": {
+        "enable_llm": True,
+        "max_llm_items_per_run": 3,
+        "llm": {
+            "endpoint": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1-mini",
+            "api_key": "",
+        },
     },
 }
 
@@ -110,8 +143,16 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     config["api_keys"] = {
         "twelve_data": os.getenv("TWELVE_DATA_API_KEY") or configured_keys.get("twelve_data", ""),
         "alpha_vantage": os.getenv("ALPHA_VANTAGE_API_KEY") or configured_keys.get("alpha_vantage", ""),
-        "finnhub": os.getenv("FINNHUB_API_KEY") or configured_keys.get("finnhub", ""),
-        "news_api": os.getenv("NEWS_API_KEY") or configured_keys.get("news_api", ""),
-        "fred": os.getenv("FRED_API_KEY") or configured_keys.get("fred", ""),
     }
+    news_analysis = dict(config.get("news_analysis") or {})
+    llm_cfg = dict(news_analysis.get("llm") or {})
+    llm_cfg["endpoint"] = os.getenv("STOCK_LAB_NEWS_LLM_ENDPOINT") or llm_cfg.get("endpoint", "https://api.openai.com/v1/chat/completions")
+    llm_cfg["model"] = os.getenv("STOCK_LAB_NEWS_LLM_MODEL") or llm_cfg.get("model", "gpt-4.1-mini")
+    llm_cfg["api_key"] = (
+        os.getenv("STOCK_LAB_NEWS_LLM_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or llm_cfg.get("api_key", "")
+    )
+    news_analysis["llm"] = llm_cfg
+    config["news_analysis"] = news_analysis
     return config

@@ -30,6 +30,8 @@ class StateContractTests(unittest.TestCase):
         self.assertIn("profit_analysis_by_account", state)
         self.assertIn("thought_process", state)
         self.assertIn("learning_center", state)
+        self.assertIn("news_processing", state["market_context"])
+        self.assertIn("news_summary", state["market_context"])
 
     def test_profit_analysis_is_built_for_each_account(self):
         accounts = {

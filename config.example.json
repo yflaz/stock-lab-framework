@@ -1,5 +1,5 @@
 {
-  "system_name": "Stock Lab",
+  "system_name": "Stock Lab v2.0",
   "execution_mode": "paper",
   "active_account_id": "a-share-paper",
   "daily_trade_limit": 4,
@@ -29,11 +29,13 @@
   ],
   "api_keys": {
     "twelve_data": "",
-    "alpha_vantage": "",
-    "finnhub": "",
-    "news_api": "",
-    "fred": ""
+    "alpha_vantage": ""
   },
+  "news_feeds": [
+    {"name": "Google News A股", "url": "https://news.google.com/rss/search?q=A%E8%82%A1+%E5%8D%8A%E5%AF%BC%E4%BD%93+OR+AI+OR+%E5%88%B8%E5%95%86+when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"},
+    {"name": "Google News 港美股", "url": "https://news.google.com/rss/search?q=Hong+Kong+stocks+OR+Nasdaq+OR+S%26P+500+when:1d&hl=en-US&gl=US&ceid=US:en"},
+    {"name": "Google News 宏观", "url": "https://news.google.com/rss/search?q=Federal+Reserve+OR+US+Treasury+yield+OR+oil+when:1d&hl=en-US&gl=US&ceid=US:en"}
+  ],
   "risk": {
     "max_position_pct": 0.25,
     "max_theme_pct": 0.45,
@@ -45,17 +47,46 @@
     "trailing_drawdown_pct": 4.0,
     "time_stop_days": 5,
     "time_stop_min_pnl_pct": -2.5,
-    "volatility_shock_pct": -5.0
+    "volatility_shock_pct": -5.0,
+    "opportunity_review_days": 2,
+    "opportunity_min_score_gap": 5.0,
+    "opportunity_min_expected_return_gap_pct": 2.5,
+    "rotation_min_candidate_score": 80.0,
+    "rotation_max_hold_pnl_pct": 9.0,
+    "rotation_underperform_pct": 3.0,
+    "active_trim_hold_days": 2,
+    "active_trim_min_score_gap": 4.0,
+    "active_trim_min_expected_return_gap_pct": 2.0
   },
   "strategy": {
     "candidate_source": "watchlist",
     "max_candidates_per_market": 12,
     "target_markets": ["A", "HK", "US"],
-    "focus_themes": []
+    "technical_trading_mode": "rotation_first",
+    "screening": {
+      "min_score": 68.0,
+      "min_expected_return_pct": 5.0,
+      "max_heat_change_pct": 8.5,
+      "prefer_pullback_near_entry": true,
+      "focus_theme_bonus": 8.0,
+      "non_focus_theme_bonus": 2.0
+    },
+    "cash_management": {
+      "soft_cash_floor_pct": 0.18,
+      "ideal_cash_floor_pct": 0.25,
+      "allow_rotation_when_better_setup": true
+    },
+    "focus_themes": ["Technology", "Healthcare", "Industrials", "Energy", "Consumer", "Financials", "Index/ETF"]
   },
   "watchlists": {
-    "A": [],
-    "HK": [],
-    "US": []
+    "A": [
+      {"symbol": "510300", "name": "CSI 300 ETF", "theme": "Index/ETF"}
+    ],
+    "HK": [
+      {"symbol": "2800.HK", "name": "Tracker Fund of Hong Kong", "theme": "Index/ETF"}
+    ],
+    "US": [
+      {"symbol": "SPY", "name": "SPDR S&P 500 ETF", "theme": "Index/ETF"}
+    ]
   }
 }

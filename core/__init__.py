@@ -1,2 +1,2 @@
-"""Core modules for Stock Lab New."""
+"""Core modules for Stock Lab v2.0."""
 

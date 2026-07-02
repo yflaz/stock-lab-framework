@@ -11,7 +11,7 @@ from core.state_builder import save_current_state
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Build Stock Lab New state.")
+    parser = argparse.ArgumentParser(description="Build Stock Lab v2.0 state.")
     parser.add_argument("--print", action="store_true", dest="print_state", help="Print generated state JSON to stdout.")
     args = parser.parse_args()
     state = save_current_state(load_config())
@@ -20,7 +20,7 @@ def main() -> None:
         return
     account = state.get("account") or {}
     print(
-        "Stock Lab New state updated | "
+        "Stock Lab v2.0 state updated | "
         f"phase={state.get('meta', {}).get('session_phase_label')} | "
         f"positions={len(state.get('positions') or [])} | "
         f"orders={len(state.get('orders') or [])} | "

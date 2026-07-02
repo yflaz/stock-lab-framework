@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .discipline import calc_buy_fees
+from .discipline import calc_buy_fees, calc_sell_fees, holding_days
 from .utils import clamp, is_trading_phase, money_text, pct_change, round2, safe_float, safe_int
 
 
@@ -41,13 +41,28 @@ def infer_setup(change_pct: float, market: str) -> str:
     return "risk_avoid"
 
 
+def _strategy_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("strategy") or {}
+
+
+def _screening_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    return _strategy_cfg(config).get("screening") or {}
+
+
+def _cash_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    return _strategy_cfg(config).get("cash_management") or {}
+
+
 def build_candidate(item: dict[str, Any], quote: dict[str, Any], market: str, config: dict[str, Any]) -> dict[str, Any]:
     latest = safe_float(quote.get("latest"))
     prev = safe_float(quote.get("prev_close"))
     change_pct = safe_float(quote.get("change_pct")) if quote else pct_change(latest, prev)
     theme = str(item.get("theme") or "其他")
     focus_themes = set((config.get("strategy") or {}).get("focus_themes") or [])
-    theme_bonus = 8 if theme in focus_themes or any(x in theme for x in focus_themes) else 2
+    screening = _screening_cfg(config)
+    focus_bonus = safe_float(screening.get("focus_theme_bonus"), 8.0)
+    other_bonus = safe_float(screening.get("non_focus_theme_bonus"), 2.0)
+    theme_bonus = focus_bonus if theme in focus_themes or any(x in theme for x in focus_themes) else other_bonus
     data_quality = 14 if latest > 0 else -18
     momentum = 0
     if -1.5 <= change_pct <= 3.8:
@@ -132,6 +147,66 @@ def build_candidate(item: dict[str, Any], quote: dict[str, Any], market: str, co
     }
 
 
+def candidate_quality_gate(candidate: dict[str, Any], config: dict[str, Any]) -> tuple[bool, list[str]]:
+    screening = _screening_cfg(config)
+    score = safe_float(candidate.get("score"))
+    expected = safe_float(candidate.get("expected_return_pct"))
+    change_pct = safe_float(candidate.get("change_pct"))
+    latest = safe_float(candidate.get("latest_price"))
+    entry_zone = candidate.get("entry_zone") or [0, 0]
+    lower = safe_float(entry_zone[0])
+    upper = safe_float(entry_zone[1])
+    notes: list[str] = []
+    blockers = 0
+
+    if latest <= 0:
+        notes.append("无有效现价")
+        blockers += 1
+    if score < safe_float(screening.get("min_score"), 70.0):
+        notes.append(f"评分 {round2(score)} 低于筛选线")
+        blockers += 1
+    if expected < safe_float(screening.get("min_expected_return_pct"), 5.0):
+        notes.append(f"目标空间 {round2(expected)}% 偏薄")
+        blockers += 1
+    if change_pct > safe_float(screening.get("max_heat_change_pct"), 7.0):
+        notes.append(f"单日涨幅 {round2(change_pct)}% 过热")
+        blockers += 1
+    if screening.get("prefer_pullback_near_entry", True) and latest > 0 and upper > 0 and latest > upper * 1.03:
+        notes.append("价格明显脱离计划区间，不适合马上追")
+        blockers += 1
+    if latest > 0 and lower > 0 and upper > 0 and lower <= latest <= upper:
+        notes.append("价格回到计划区间附近")
+    return blockers == 0, notes
+
+
+def candidate_priority_score(candidate: dict[str, Any], config: dict[str, Any]) -> float:
+    score = safe_float(candidate.get("score"))
+    expected = safe_float(candidate.get("expected_return_pct"))
+    change_pct = safe_float(candidate.get("change_pct"))
+    latest = safe_float(candidate.get("latest_price"))
+    entry_zone = candidate.get("entry_zone") or [0, 0]
+    lower = safe_float(entry_zone[0])
+    upper = safe_float(entry_zone[1])
+    setup = str(candidate.get("setup_type") or "")
+    proximity_bonus = 0.0
+    if latest > 0 and lower > 0 and upper > 0:
+        if lower <= latest <= upper:
+            proximity_bonus = 8.0
+        elif latest <= upper * 1.02:
+            proximity_bonus = 4.0
+        elif latest > upper * 1.03:
+            proximity_bonus = -7.0
+    setup_bonus = {
+        "breakout_follow": 5.0,
+        "trend_hold": 3.0,
+        "weak_repair": 1.0,
+        "overheated_pullback": -5.0,
+        "risk_avoid": -15.0,
+    }.get(setup, 0.0)
+    heat_penalty = max(change_pct - 4.0, 0.0) * 1.2
+    return round2(score + expected * 1.3 + proximity_bonus + setup_bonus - heat_penalty)
+
+
 def build_candidates(config: dict[str, Any], market_context: dict[str, Any]) -> list[dict[str, Any]]:
     watchlists = config.get("watchlists") or {}
     quotes_by_market = market_context.get("quotes") or {}
@@ -143,15 +218,26 @@ def build_candidates(config: dict[str, Any], market_context: dict[str, Any]) -> 
             symbol = str(item.get("symbol") or "")
             quote = quotes.get(symbol) or {"symbol": symbol, "name": item.get("name"), "market": market}
             result.append(build_candidate(item, quote, market, config))
-    result.sort(key=lambda x: (x.get("market") != "A", -safe_float(x.get("score")), -safe_float(x.get("expected_return_pct"))))
-    max_candidates = safe_int((config.get("strategy") or {}).get("max_candidates_per_market"), 12)
-    by_market: dict[str, list[dict[str, Any]]] = {}
+    filtered: list[dict[str, Any]] = []
     for candidate in result:
+        passed, notes = candidate_quality_gate(candidate, config)
+        candidate["screen_passed"] = passed
+        candidate["screen_notes"] = notes
+        candidate["priority_score"] = candidate_priority_score(candidate, config)
+        if not passed:
+            continue
+        filtered.append(candidate)
+    filtered.sort(key=lambda x: (x.get("market") != "A", -safe_float(x.get("priority_score")), -safe_float(x.get("score")), -safe_float(x.get("expected_return_pct"))))
+    max_candidates = safe_int((config.get("strategy") or {}).get("max_candidates_per_market"), 12)
+    max_total = safe_int((config.get("strategy") or {}).get("max_total_candidates"), max_candidates * 2)
+    by_market: dict[str, list[dict[str, Any]]] = {}
+    for candidate in filtered:
         by_market.setdefault(str(candidate.get("market")), []).append(candidate)
     trimmed: list[dict[str, Any]] = []
     for items in by_market.values():
         trimmed.extend(items[:max_candidates])
-    return trimmed
+    trimmed.sort(key=lambda x: (x.get("market") != "A", -safe_float(x.get("priority_score"))))
+    return trimmed[:max_total]
 
 
 def action_from_candidate(candidate: dict[str, Any], account: dict[str, Any], config: dict[str, Any]) -> tuple[str, str]:
@@ -162,18 +248,40 @@ def action_from_candidate(candidate: dict[str, Any], account: dict[str, Any], co
     equity = safe_float(account.get("equity") or account.get("initial_cash") or 1)
     cash_pct = cash / max(equity, 1)
     min_cash_pct = safe_float((config.get("risk") or {}).get("min_cash_pct"), 0.1)
+    cash_cfg = _cash_cfg(config)
+    soft_cash_floor = safe_float(cash_cfg.get("soft_cash_floor_pct"), max(min_cash_pct, 0.18))
+    ideal_cash_floor = safe_float(cash_cfg.get("ideal_cash_floor_pct"), max(soft_cash_floor, 0.25))
+    expected = safe_float(candidate.get("expected_return_pct"))
+    priority_score = safe_float(candidate.get("priority_score") or candidate.get("score"))
+    screen_passed = candidate.get("screen_passed") is not False
+    entry_zone = candidate.get("entry_zone") or [0, 0]
+    lower = safe_float(entry_zone[0])
+    upper = safe_float(entry_zone[1])
+    near_entry = latest > 0 and lower > 0 and upper > 0 and latest <= upper * 1.02
     if latest <= 0:
         return "observe_only", "没有可用价格，不能交易。"
+    if not screen_passed:
+        return "avoid_for_now", "今天不在优先观察名单里，先不浪费注意力。"
     if setup_type == "risk_avoid":
         return "avoid_for_now", "价格已经明显走弱，先确认风险来源。"
     if cash_pct < min_cash_pct:
-        return "watch_confirm", "现金缓冲偏低，新增仓位要等更强确认。"
+        if priority_score >= 96 and expected >= 9:
+            return "watch_confirm", "机会本身不错，但现金已跌破硬缓冲，优先等腾仓或更好确认。"
+        return "avoid_for_now", "现金缓冲过低，今天新增仓位不划算。"
     if setup_type == "overheated_pullback":
         return "watch_pullback", "涨幅偏高，纪律要求等回踩到计划区间。"
-    if score >= 86 and setup_type in {"breakout_follow", "trend_hold"}:
+    if cash_pct < soft_cash_floor and priority_score < 95:
+        return "watch_confirm", "手里现金不算宽裕，只有更高把握机会才值得出手。"
+    if score >= 88 and expected >= 8 and setup_type in {"breakout_follow", "trend_hold", "weak_repair"}:
         return "direct_follow", "评分和位置同时满足，允许按计划区间执行。"
-    if score >= 78:
-        return "watch_confirm", "逻辑不错，但还需要量价或板块确认。"
+    if score >= 84 and expected >= 7 and priority_score >= 90 and near_entry and setup_type in {"breakout_follow", "trend_hold", "weak_repair"}:
+        return "direct_follow", "虽然不是最极致强势，但位置、赔率和优先级都够，允许更主动一些。"
+    if score >= 80 and expected >= 6 and priority_score >= 92 and cash_pct >= soft_cash_floor and setup_type in {"breakout_follow", "trend_hold"}:
+        return "direct_follow", "板块和位置都不差，允许把等确认提升为可执行观察。"
+    if score >= 80 and expected >= 6:
+        return "watch_confirm", "逻辑不错，但更适合继续等位置、量价或板块确认。"
+    if cash_pct >= ideal_cash_floor and score >= 76 and expected >= 6.5 and setup_type == "weak_repair":
+        return "watch_pullback", "可以继续盯，但先等更舒服的位置，不急着抢。"
     return "observe_only", "当前更适合观察，不主动占用交易机会。"
 
 
@@ -182,6 +290,8 @@ def build_committee_review(candidate: dict[str, Any], account: dict[str, Any], c
     score = safe_float(candidate.get("score"))
     expected = safe_float(candidate.get("expected_return_pct"))
     change = safe_float(candidate.get("change_pct"))
+    priority_score = safe_float(candidate.get("priority_score") or candidate.get("score"))
+    screen_notes = candidate.get("screen_notes") or []
     risk_reward = expected / max(abs((safe_float(candidate.get("latest_price")) / max(safe_float(candidate.get("stop_loss")), 0.01) - 1) * 100), 0.01)
     risk_reward = round2(risk_reward)
     debate = [
@@ -189,6 +299,7 @@ def build_committee_review(candidate: dict[str, Any], account: dict[str, Any], c
         f"技术：当日涨跌幅 {round2(change)}%，形态归类为 {candidate.get('setup_label')}。",
         f"赔率：预期空间 {round2(expected)}%，粗略收益风险比 {risk_reward}。",
         f"执行：{trader_summary}",
+        f"筛选：{'；'.join(screen_notes[:3]) if screen_notes else '通过优先筛选，进入今天重点观察名单。'}",
     ]
     return {
         "symbol": candidate.get("symbol"),
@@ -197,6 +308,7 @@ def build_committee_review(candidate: dict[str, Any], account: dict[str, Any], c
         "account_id": candidate.get("account_id"),
         "theme": candidate.get("theme"),
         "committee_score": round2(score),
+        "priority_score": round2(priority_score),
         "committee_action": action,
         "conviction": "high" if action == "direct_follow" else "medium" if action in {"watch_pullback", "watch_confirm"} else "low",
         "debate": debate,
@@ -244,13 +356,15 @@ def build_agent_committee_snapshot(
     reviews.sort(key=lambda x: (priority.get(str(x.get("committee_action")), 9), -safe_float(x.get("committee_score"))))
     direct = [x for x in reviews if x.get("committee_action") == "direct_follow"]
     pullback = [x for x in reviews if x.get("committee_action") == "watch_pullback"]
+    confirm = [x for x in reviews if x.get("committee_action") == "watch_confirm"]
     avoid = [x for x in reviews if x.get("committee_action") == "avoid_for_now"]
     summary = []
     if reviews:
         summary = [
             f"本轮审议 {len(reviews)} 个候选：可直接跟随 {len(direct)} 个，等回踩 {len(pullback)} 个，明确回避 {len(avoid)} 个。",
+            f"其中等确认 {len(confirm)} 个，说明今天更重位置和胜率，不是看到异动就上。",
             "新增买入必须排在持仓纪律检查之后；止损、止盈和移动止盈先执行。",
-            "候选不是越多越好，观察池会按市场、主题、赔率和现金约束分层。",
+            "候选不是越多越好，观察池会先筛掉不值得看的，再按市场、主题、赔率和现金约束分层。",
         ]
     return {
         "mode": "multi_market_committee_v3",
@@ -258,8 +372,10 @@ def build_agent_committee_snapshot(
         "summary": summary,
         "portfolio_plan": {
             "new_entry_bias": "attack_selectively" if direct else "wait_for_better_trigger",
+            "research_style": "screen-first-then-rotate",
             "direct_follow_symbols": [x.get("symbol") for x in direct[:4]],
             "watch_pullback_symbols": [x.get("symbol") for x in pullback[:4]],
+            "watch_confirm_symbols": [x.get("symbol") for x in confirm[:4]],
             "avoid_symbols": [x.get("symbol") for x in avoid[:4]],
         },
         "candidate_reviews": reviews,
@@ -311,6 +427,190 @@ def estimate_buy_shares(order: dict[str, Any], account: dict[str, Any], config: 
     budget = min(budget, cash_budget)
     lot = 100 if str(order.get("market")) in {"A", "HK"} else 1
     return max(int(budget / latest / lot) * lot, 0)
+
+
+def build_rotation_review(
+    position: dict[str, Any],
+    candidate: dict[str, Any],
+    account: dict[str, Any],
+    generated_at: str,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    risk = config.get("risk") or {}
+    hold_days = holding_days(position, generated_at)
+    pnl_pct = safe_float(position.get("unrealized_pnl_pct"))
+    today_pnl_pct = safe_float(position.get("today_pnl_pct"))
+    candidate_score = safe_float(candidate.get("committee_score") or candidate.get("score"))
+    held_score = safe_float(position.get("score"))
+    score_gap = round2(candidate_score - held_score)
+    candidate_expected = safe_float(candidate.get("expected_return_pct"))
+    held_latest = safe_float(position.get("latest_price"))
+    held_target = safe_float(position.get("target_price"))
+    held_expected = round2((held_target / held_latest - 1) * 100) if held_latest > 0 and held_target > 0 else 0.0
+    expected_gap = round2(candidate_expected - held_expected)
+    candidate_action = str(candidate.get("committee_action") or "")
+    min_days = safe_int(risk.get("opportunity_review_days"), 3)
+    min_score_gap = safe_float(risk.get("opportunity_min_score_gap"), 8.0)
+    min_expected_gap = safe_float(risk.get("opportunity_min_expected_return_gap_pct"), 4.0)
+    min_candidate_score = safe_float(risk.get("rotation_min_candidate_score"), 84.0)
+    max_hold_pnl = safe_float(risk.get("rotation_max_hold_pnl_pct"), 6.0)
+    underperform = safe_float(risk.get("rotation_underperform_pct"), 1.5)
+    trim_days = safe_int(risk.get("active_trim_hold_days"), min_days)
+    trim_score_gap = safe_float(risk.get("active_trim_min_score_gap"), max(4.0, min_score_gap - 1.0))
+    trim_expected_gap = safe_float(risk.get("active_trim_min_expected_return_gap_pct"), max(2.0, min_expected_gap - 1.0))
+    shares = safe_int(position.get("shares"))
+    lot = 100 if str(position.get("market") or account.get("market") or "A") in {"A", "HK"} else 1
+    trim_shares = max((shares // 2 // lot) * lot, 0)
+    if candidate_action not in {"direct_follow", "watch_confirm"}:
+        return None
+    if candidate_score < min_candidate_score:
+        return None
+    if hold_days < min(trim_days, min_days):
+        return None
+    if pnl_pct > max_hold_pnl and candidate_action == "direct_follow":
+        return None
+    if candidate_action == "direct_follow":
+        if not (score_gap >= min_score_gap and expected_gap >= min_expected_gap and pnl_pct <= underperform):
+            return None
+        sell_shares = shares
+        action = "机会成本换仓"
+        action_code = "opportunity_rotation"
+        reason = f"{position.get('name') or position.get('symbol')} 持有 {hold_days} 天、当前浮盈亏 {round2(pnl_pct)}%，而 {candidate.get('name') or candidate.get('symbol')} 已进入 direct_follow，评分高 {score_gap} 分、预期空间多 {expected_gap}%。为避免机会成本，优先考虑割弱换强。"
+    else:
+        weak_now = pnl_pct <= underperform or today_pnl_pct <= -1.5
+        if trim_shares <= 0 or not weak_now:
+            return None
+        if not (score_gap >= trim_score_gap and expected_gap >= trim_expected_gap and hold_days >= trim_days):
+            return None
+        sell_shares = trim_shares
+        action = "主动减仓腾挪"
+        action_code = "active_rebalance_trim"
+        reason = f"{position.get('name') or position.get('symbol')} 当前弹性一般（持有 {hold_days} 天、浮盈亏 {round2(pnl_pct)}%、今日 {round2(today_pnl_pct)}%），而 {candidate.get('name') or candidate.get('symbol')} 虽仍在等确认，但评分高 {score_gap} 分、预期空间多 {expected_gap}%。先减半腾一点仓位，比一直抱死更灵活。"
+    return {
+        "symbol": position.get("symbol"),
+        "name": position.get("name"),
+        "account_id": position.get("account_id") or account.get("id"),
+        "market": position.get("market"),
+        "action": action,
+        "action_code": action_code,
+        "mandatory": False,
+        "severity": "important",
+        "sell_shares": sell_shares,
+        "candidate_symbol": candidate.get("symbol"),
+        "candidate_name": candidate.get("name"),
+        "candidate_account_id": candidate.get("account_id"),
+        "candidate_market": candidate.get("market"),
+        "candidate_score": candidate_score,
+        "candidate_expected_return_pct": candidate_expected,
+        "score_gap": score_gap,
+        "expected_gap": expected_gap,
+        "reason": reason,
+        "checks": [
+            f"当前持仓评分 {round2(held_score)}，候选评分 {round2(candidate_score)}。",
+            f"当前持仓剩余目标空间约 {round2(held_expected)}%，候选预期空间 {round2(candidate_expected)}%。",
+            f"持有 {hold_days} 天，浮盈亏 {round2(pnl_pct)}%，今日表现 {round2(today_pnl_pct)}%。",
+        ],
+    }
+
+
+def execute_rotation_sell(
+    position: dict[str, Any],
+    account: dict[str, Any],
+    action: dict[str, Any],
+    trade_log: list[dict[str, Any]],
+    generated_at: str,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    sell_shares = min(safe_int(action.get("sell_shares")), safe_int(position.get("shares")))
+    latest = safe_float(position.get("latest_price") or position.get("cost_price"))
+    if sell_shares <= 0 or latest <= 0:
+        return None
+    market = str(position.get("market") or account.get("market") or "A")
+    gross = round2(latest * sell_shares)
+    fees = calc_sell_fees(gross, config.get("fees") or {}, market)
+    net = round2(gross - fees)
+    old_shares = safe_int(position.get("shares"))
+    old_cost_basis = safe_float(position.get("cost_basis") or old_shares * safe_float(position.get("cost_price")))
+    avg_cost = old_cost_basis / old_shares if old_shares else latest
+    realized = round2(net - avg_cost * sell_shares)
+    account["cash"] = round2(safe_float(account.get("cash")) + net)
+    account["realized_pnl"] = round2(safe_float(account.get("realized_pnl")) + realized)
+    remaining = old_shares - sell_shares
+    position["shares"] = max(remaining, 0)
+    position["cost_basis"] = round2(avg_cost * max(remaining, 0))
+    position["market_value"] = round2(latest * max(remaining, 0))
+    position["unrealized_pnl"] = round2(position["market_value"] - position["cost_basis"])
+    position["unrealized_pnl_pct"] = round2((position["market_value"] / position["cost_basis"] - 1) * 100) if position["cost_basis"] else 0.0
+    trade = {
+        "timestamp": generated_at,
+        "type": "sell" if remaining == 0 else "reduce",
+        "symbol": position.get("symbol"),
+        "name": position.get("name"),
+        "market": market,
+        "account_id": position.get("account_id") or account.get("id"),
+        "price": round2(latest),
+        "shares": sell_shares,
+        "gross_amount": gross,
+        "fees": fees,
+        "net_amount": net,
+        "realized_pnl": realized,
+        "cash_after": account["cash"],
+        "reason": action.get("reason"),
+        "discipline_action": False,
+        "counts_against_daily_limit": False,
+        "opportunity_id": f"ROTATE-{generated_at[:10]}-{position.get('symbol')}-{action.get('candidate_symbol')}",
+        "opportunity_label": "机会成本换仓",
+        "risk_note": "为更强候选腾仓；卖出端不单独占用主动买入额度，买入端仍受 daily_trade_limit 约束。",
+    }
+    trade_log.append(trade)
+    return trade
+
+
+def apply_rotation_actions(
+    positions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    accounts_by_id: dict[str, dict[str, Any]],
+    trade_log: list[dict[str, Any]],
+    generated_at: str,
+    config: dict[str, Any],
+    active_markets: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+    allowed_markets = {str(m) for m in (active_markets or set()) if m}
+    candidates_by_account: dict[str, list[dict[str, Any]]] = {}
+    for order in orders:
+        market = str(order.get("market") or "")
+        if allowed_markets and market not in allowed_markets:
+            continue
+        if order.get("committee_action") != "direct_follow":
+            continue
+        candidates_by_account.setdefault(str(order.get("account_id") or ""), []).append(order)
+    for items in candidates_by_account.values():
+        items.sort(key=lambda x: (-safe_float(x.get("committee_score") or x.get("score")), -safe_float(x.get("expected_return_pct"))))
+    used_candidate_keys: set[str] = set()
+    for position in list(positions):
+        market = str(position.get("market") or "")
+        if allowed_markets and market not in allowed_markets:
+            continue
+        account_id = str(position.get("account_id") or config.get("active_account_id"))
+        account = accounts_by_id.get(account_id)
+        if not account:
+            continue
+        candidates = candidates_by_account.get(account_id) or []
+        candidate = next((item for item in candidates if item.get("symbol") != position.get("symbol") and f"{account_id}:{item.get('symbol')}" not in used_candidate_keys), None)
+        if not candidate:
+            continue
+        action = build_rotation_review(position, candidate, account, generated_at, config)
+        if not action:
+            continue
+        trade = execute_rotation_sell(position, account, action, trade_log, generated_at, config)
+        if trade:
+            action["executed"] = True
+            action["trade"] = trade
+            used_candidate_keys.add(f"{account_id}:{candidate.get('symbol')}")
+        queue.append(action)
+    positions[:] = [p for p in positions if safe_int(p.get("shares")) > 0]
+    return queue
 
 
 def apply_entry_orders(

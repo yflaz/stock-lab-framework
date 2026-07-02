@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.discipline import apply_discipline_actions, evaluate_position_discipline
-from core.strategy import action_from_candidate
+from core.strategy import action_from_candidate, build_candidates, build_rotation_review
 
 
 class DisciplineTests(unittest.TestCase):
@@ -99,6 +99,102 @@ class DisciplineTests(unittest.TestCase):
         candidate = {"latest_price": 10, "score": 90, "setup_type": "overheated_pullback"}
         action, _ = action_from_candidate(candidate, account, config)
         self.assertEqual(action, "watch_pullback")
+
+
+    def test_low_cash_candidate_is_avoided(self):
+        config = self.base_config()
+        config["strategy"] = {"cash_management": {"soft_cash_floor_pct": 0.18, "ideal_cash_floor_pct": 0.25}}
+        account = {"cash": 2000, "equity": 50000}
+        candidate = {
+            "latest_price": 10,
+            "score": 92,
+            "expected_return_pct": 7.5,
+            "setup_type": "trend_hold",
+            "screen_passed": True,
+            "priority_score": 90,
+        }
+        action, _ = action_from_candidate(candidate, account, config)
+        self.assertEqual(action, "avoid_for_now")
+
+    def test_build_candidates_filters_overheated_names(self):
+        config = self.base_config()
+        config["strategy"] = {
+            "target_markets": ["A"],
+            "max_candidates_per_market": 10,
+            "max_total_candidates": 10,
+            "focus_themes": ["AI"],
+            "screening": {
+                "min_score": 70,
+                "min_expected_return_pct": 5,
+                "max_heat_change_pct": 7,
+                "prefer_pullback_near_entry": True,
+                "focus_theme_bonus": 8,
+                "non_focus_theme_bonus": 2,
+            },
+        }
+        config["watchlists"] = {"A": [
+            {"symbol": "000001", "name": "平安样本", "theme": "AI"},
+            {"symbol": "000002", "name": "过热样本", "theme": "AI"},
+        ]}
+        market_context = {"quotes": {"A": {
+            "000001": {"symbol": "000001", "name": "平安样本", "latest": 10.0, "prev_close": 9.85, "change_pct": 1.52},
+            "000002": {"symbol": "000002", "name": "过热样本", "latest": 10.0, "prev_close": 9.0, "change_pct": 11.11},
+        }}}
+        candidates = build_candidates(config, market_context)
+        self.assertEqual([c["symbol"] for c in candidates], ["000001"])
+
+    def test_high_priority_candidate_can_be_direct_followed_more_actively(self):
+        config = self.base_config()
+        config["strategy"] = {"cash_management": {"soft_cash_floor_pct": 0.18, "ideal_cash_floor_pct": 0.25}}
+        account = {"cash": 18000, "equity": 50000}
+        candidate = {
+            "latest_price": 10,
+            "score": 85,
+            "expected_return_pct": 7.2,
+            "setup_type": "trend_hold",
+            "screen_passed": True,
+            "priority_score": 91,
+            "entry_zone": [9.9, 10.1],
+        }
+        action, _ = action_from_candidate(candidate, account, config)
+        self.assertEqual(action, "direct_follow")
+
+    def test_watch_confirm_candidate_can_trigger_active_trim(self):
+        config = self.base_config()
+        config["risk"].update({
+            "opportunity_review_days": 2,
+            "rotation_min_candidate_score": 80,
+            "active_trim_hold_days": 2,
+            "active_trim_min_score_gap": 4,
+            "active_trim_min_expected_return_gap_pct": 2,
+            "rotation_underperform_pct": 3,
+        })
+        position = {
+            "symbol": "000001",
+            "name": "弱势持仓",
+            "market": "A",
+            "account_id": "a-share-paper",
+            "shares": 600,
+            "latest_price": 10,
+            "target_price": 10.5,
+            "unrealized_pnl_pct": 1.0,
+            "today_pnl_pct": -2.0,
+            "score": 76,
+            "entry_date": "2026-06-20T09:30:00",
+        }
+        candidate = {
+            "symbol": "000002",
+            "name": "更强候选",
+            "account_id": "a-share-paper",
+            "market": "A",
+            "committee_action": "watch_confirm",
+            "committee_score": 84,
+            "expected_return_pct": 8.5,
+        }
+        account = {"id": "a-share-paper", "market": "A"}
+        action = build_rotation_review(position, candidate, account, "2026-06-23T10:30:00", config)
+        self.assertEqual(action["action_code"], "active_rebalance_trim")
+        self.assertEqual(action["sell_shares"], 300)
 
 
 if __name__ == "__main__":

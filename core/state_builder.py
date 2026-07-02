@@ -7,9 +7,11 @@ from typing import Any
 from .config import load_config
 from .discipline import apply_discipline_actions
 from .market_data import collect_market_quotes
+from .news_analysis import analyze_mapped_headlines, term_matches_text
 from .state_store import load_sectors, load_state, save_json, save_state, SECTOR_PATH
 from .strategy import (
     apply_entry_orders,
+    apply_rotation_actions,
     build_agent_committee_snapshot,
     build_candidates,
     count_active_trade_slots,
@@ -115,6 +117,80 @@ def refresh_positions(positions: list[dict[str, Any]], market_context: dict[str,
         pos["data_source"] = quote.get("data_source") or pos.get("data_source") or "previous_state_fallback"
 
 
+RULE_CHANGE_SPECS = [
+    ("risk.max_position_pct", "单票上限", "pct_ratio"),
+    ("risk.max_theme_pct", "主题上限", "pct_ratio"),
+    ("risk.min_cash_pct", "最低现金比", "pct_ratio"),
+    ("risk.trailing_activation_pct", "移动止盈启动", "pct"),
+    ("risk.trailing_drawdown_pct", "移动止盈回撤", "pct"),
+    ("risk.time_stop_days", "时间止损天数", "days"),
+    ("risk.time_stop_min_pnl_pct", "时间止损盈亏线", "pct"),
+    ("risk.opportunity_review_days", "机会成本复核天数", "days"),
+    ("risk.opportunity_min_score_gap", "机会成本评分差", "score"),
+    ("risk.opportunity_min_expected_return_gap_pct", "机会成本预期差", "pct"),
+    ("risk.rotation_min_candidate_score", "调仓最低候选分", "score"),
+    ("risk.rotation_max_hold_pnl_pct", "高浮盈不轻易换仓线", "pct"),
+    ("risk.rotation_underperform_pct", "持仓落后容忍线", "pct"),
+    ("strategy.screening.min_score", "候选最低分", "score"),
+    ("strategy.screening.min_expected_return_pct", "候选最低预期空间", "pct"),
+    ("strategy.screening.max_heat_change_pct", "过热上限", "pct"),
+]
+
+
+def nested_get(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for key in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def format_rule_value(value: Any, kind: str) -> str:
+    if value is None or value == "":
+        return "--"
+    if kind == "pct_ratio":
+        return f"{round2(safe_float(value) * 100)}%"
+    if kind == "pct":
+        return f"{round2(value)}%"
+    if kind == "days":
+        return f"{safe_int(value)} 天"
+    if kind == "score":
+        return f"{round2(value)}"
+    return str(value)
+
+
+def build_rule_change_bundle(config: dict[str, Any], previous_state: dict[str, Any]) -> dict[str, Any]:
+    current_rules = {path: nested_get(config, path) for path, _, _ in RULE_CHANGE_SPECS}
+    previous_rules = ((previous_state.get("config_snapshot") or {}).get("rules") or {})
+    changes: list[dict[str, str]] = []
+    for path, label, kind in RULE_CHANGE_SPECS:
+        current_value = current_rules.get(path)
+        previous_value = previous_rules.get(path)
+        if previous_value is None:
+            continue
+        if format_rule_value(current_value, kind) == format_rule_value(previous_value, kind):
+            continue
+        changes.append(
+            {
+                "path": path,
+                "label": label,
+                "before": format_rule_value(previous_value, kind),
+                "after": format_rule_value(current_value, kind),
+                "text": f"{label}：{format_rule_value(previous_value, kind)} → {format_rule_value(current_value, kind)}",
+            }
+        )
+    return {"rules": current_rules, "changes": changes[:12]}
+
+
+def build_previous_position_map(previous_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        f"{item.get('account_id')}:{item.get('symbol')}": item
+        for item in previous_state.get("positions") or []
+        if item.get("symbol")
+    }
+
+
 def recompute_accounts(accounts_by_id: dict[str, dict[str, Any]], positions: list[dict[str, Any]], config: dict[str, Any], trade_log: list[dict[str, Any]], generated_at: str) -> None:
     for account in accounts_by_id.values():
         account_id = str(account.get("id"))
@@ -151,12 +227,13 @@ def build_portfolio_summary(active_account: dict[str, Any], positions: list[dict
         "cash_pct": round2(cash_pct * 100),
         "invested_pct": round2(invested_pct * 100),
         "largest_position_pct": round2(largest_pct * 100),
-        "selection_method": "先按账户/市场分层，再用主题、位置、赔率、现金和风险纪律筛候选；A股优先使用 AKShare/腾讯行情，港美股使用环境变量中的海外数据源。",
-        "turnover_policy": "每天固定主动交易机会；强制止损、止盈和移动止盈不被机会额度拦住，因为纪律优先于进攻。",
+        "selection_method": "先筛掉今天不值得看的票，再比较新机会、现持仓和现金缓冲；A股优先使用 AKShare/腾讯行情，港美股使用环境变量中的海外数据源。",
+        "turnover_policy": "每天固定主动交易机会；强制纪律与机会成本换仓可先卖后看，主动买入仍受机会额度约束，避免一直抱着弱票不动，也避免没有把握时硬做。",
         "activity_explanation": [
             f"当前账户持仓 {len(account_positions)} 只，计划单 {len([o for o in orders if str(o.get('account_id')) == account_id])} 个。",
-            f"现金占比约 {round2(cash_pct * 100)}%，低于规则要求时会自动降低新增买入等级。",
-            "新增买入只允许 direct_follow；watch_pullback/watch_confirm 只进观察或挂单候选。",
+            f"现金占比约 {round2(cash_pct * 100)}%，低于规则要求时会自动降低新增买入等级，高于理想水位时才更积极进攻。",
+            "新增买入只允许 direct_follow；watch_pullback/watch_confirm 只进观察或挂单候选，不因为有票可看就强行出手。",
+            "如果外部 direct_follow 明显强于当前弱持仓，会触发机会成本换仓复核，避免长期低换手占用资金。",
         ],
     }
 
@@ -242,6 +319,147 @@ def build_exposure_breakdown(positions: list[dict[str, Any]], account_id: str, e
     }
 
 
+THEME_KEYWORDS = {
+    "technology": ["technology", "tech", "科技", "ai", "chip", "semiconductor", "软件", "算力", "半导体", "人工智能"],
+    "healthcare": ["healthcare", "medical", "biotech", "医药", "创新药", "医疗", "生物"],
+    "industrials": ["industrials", "industry", "制造", "设备", "机械", "军工", "基建", "电网"],
+    "energy": ["energy", "oil", "gas", "power", "coal", "光伏", "风电", "储能", "电力", "能源", "原油"],
+    "finance": ["finance", "bank", "broker", "insurance", "银行", "券商", "保险", "利率", "收益率"],
+    "consumer": ["consumer", "retail", "beer", "liquor", "food", "消费", "白酒", "零售", "食品"],
+}
+
+
+def canonical_theme_key(theme: Any) -> str:
+    text = str(theme or "").strip().lower()
+    return " ".join(text.split())
+
+
+def theme_terms(theme: Any) -> list[str]:
+    raw = str(theme or "").strip()
+    if not raw:
+        return []
+    lowered = canonical_theme_key(raw)
+    terms = {raw.lower(), lowered}
+    for key, keywords in THEME_KEYWORDS.items():
+        if key in lowered or lowered in key or raw.lower() in keywords:
+            terms.update(keywords)
+    return [term for term in terms if len(term) >= 2]
+
+
+def build_mapped_headlines(
+    headlines: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    subjects = []
+    for item in positions:
+        subjects.append({
+            "kind": "position",
+            "symbol": str(item.get("symbol") or ""),
+            "name": str(item.get("name") or ""),
+            "theme": str(item.get("theme") or "其他"),
+            "account_id": str(item.get("account_id") or ""),
+            "market": str(item.get("market") or "A"),
+        })
+    for item in orders:
+        subjects.append({
+            "kind": "watch",
+            "symbol": str(item.get("symbol") or ""),
+            "name": str(item.get("name") or ""),
+            "theme": str(item.get("theme") or "其他"),
+            "account_id": str(item.get("account_id") or ""),
+            "market": str(item.get("market") or "A"),
+        })
+
+    mapped: list[dict[str, Any]] = []
+    for headline in headlines or []:
+        title = str(headline.get("title") or "").strip()
+        if not title:
+            continue
+        haystack = f"{title} {headline.get('source') or ''}".lower()
+        matched_positions: list[dict[str, Any]] = []
+        matched_watch: list[dict[str, Any]] = []
+        matched_themes: list[str] = []
+        seen_keys: set[str] = set()
+        for subject in subjects:
+            symbol = subject["symbol"]
+            name = subject["name"].lower()
+            theme = subject["theme"]
+            terms = [symbol.lower()] if symbol else []
+            if len(name) >= 2:
+                terms.append(name)
+            terms.extend(theme_terms(theme))
+            if any(term_matches_text(term, haystack) for term in terms):
+                key = f"{subject['kind']}::{subject['account_id']}::{symbol}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                row = {
+                    "symbol": symbol,
+                    "name": subject["name"],
+                    "theme": theme,
+                    "account_id": subject["account_id"],
+                    "market": subject["market"],
+                }
+                if subject["kind"] == "position":
+                    matched_positions.append(row)
+                else:
+                    matched_watch.append(row)
+                if theme and theme not in matched_themes:
+                    matched_themes.append(theme)
+        if matched_positions or matched_watch:
+            mapped.append({
+                "title": title,
+                "source": headline.get("source") or "",
+                "url": headline.get("url") or "",
+                "published_at": headline.get("published_at") or "",
+                "matched_themes": matched_themes[:4],
+                "related_positions": matched_positions[:4],
+                "related_watchlist": matched_watch[:4],
+                "related_position_symbols": [x.get("symbol") for x in matched_positions[:4]],
+                "related_watch_symbols": [x.get("symbol") for x in matched_watch[:4]],
+            })
+    return mapped[:8]
+
+
+def build_home_digest(
+    active_account_id: str,
+    learning_center: dict[str, Any],
+    mapped_headlines: list[dict[str, Any]],
+    news_summary: dict[str, Any],
+    decision_latest: dict[str, Any],
+    discipline_queue: list[dict[str, Any]],
+) -> dict[str, Any]:
+    position_reviews = [item for item in (learning_center.get("position_reviews") or []) if item.get("changes")]
+    account_news = [
+        item
+        for item in (mapped_headlines or [])
+        if any(str(x.get("account_id") or "") == active_account_id for x in (item.get("related_positions") or []) + (item.get("related_watchlist") or []))
+    ]
+    urgent = [
+        item
+        for item in (discipline_queue or [])
+        if str(item.get("account_id") or "") == active_account_id and item.get("severity") != "pass"
+    ]
+    summary_items = [
+        {"label": "规则改动", "value": len(learning_center.get("rule_changes") or []), "kind": "good" if learning_center.get("rule_changes") else "info", "note": "昨晚复盘后变化"},
+        {"label": "持仓参数改动", "value": len(position_reviews), "kind": "good" if position_reviews else "info", "note": "止损/目标/失效条件"},
+        {"label": "命中线索", "value": len(account_news), "kind": "warn" if account_news else "info", "note": f"高影响 {safe_int(news_summary.get('high_impact_count'))} 条" if account_news else "新闻映射到持仓/观察股"},
+        {"label": "优先动作", "value": len(urgent), "kind": "warn" if urgent else "info", "note": "纪律与换仓先处理"},
+    ]
+    action_lines = [
+        *[str(x.get("text") or "") for x in (learning_center.get("rule_changes") or [])[:3]],
+        *[f"{item.get('name')}({item.get('symbol')})：{(item.get('changes') or [{}])[0].get('text')}" for item in position_reviews[:3]],
+        *[f"{item.get('name')}({item.get('symbol')})：{item.get('reason')}" for item in urgent[:3]],
+    ]
+    return {
+        "summary_items": summary_items,
+        "action_lines": [line for line in action_lines if line][:8],
+        "headline_hits": account_news[:5],
+        "headline": decision_latest.get("summary") or "",
+    }
+
+
 def build_account_analytics(accounts_by_id: dict[str, dict[str, Any]], positions: list[dict[str, Any]], trade_log: list[dict[str, Any]]) -> dict[str, Any]:
     analytics: dict[str, Any] = {}
     for account_id, account in accounts_by_id.items():
@@ -275,7 +493,15 @@ def build_account_analytics(accounts_by_id: dict[str, dict[str, Any]], positions
     return analytics
 
 
-def build_profit_analysis(active_account: dict[str, Any], positions: list[dict[str, Any]], trade_log: list[dict[str, Any]], account_analytics: dict[str, Any]) -> dict[str, Any]:
+def build_profit_analysis(
+    active_account: dict[str, Any],
+    positions: list[dict[str, Any]],
+    trade_log: list[dict[str, Any]],
+    account_analytics: dict[str, Any],
+    orders: list[dict[str, Any]] | None = None,
+    headlines: list[dict[str, Any]] | None = None,
+    previous_positions: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     account_id = str(active_account.get("id"))
     currency = account_currency(active_account)
     account_positions = [p for p in positions if str(p.get("account_id")) == account_id]
@@ -293,36 +519,58 @@ def build_profit_analysis(active_account: dict[str, Any], positions: list[dict[s
         for key, value in sorted(daily.items(), reverse=True)
     ]
     by_theme = (account_analytics.get(account_id) or {}).get("exposure", {}).get("by_theme", [])
+    challengers = sorted(
+        [x for x in (orders or []) if str(x.get("account_id")) == account_id],
+        key=lambda item: (
+            {"direct_follow": 0, "watch_pullback": 1, "watch_confirm": 2, "observe_only": 3, "avoid_for_now": 4}.get(str(item.get("committee_action")), 9),
+            -safe_float(item.get("committee_score") or item.get("score")),
+        ),
+    )
+    top_challenger = challengers[0] if challengers else None
+    top_winners = [
+        {
+            "symbol": p.get("symbol"),
+            "name": p.get("name"),
+            "pnl": round2(p.get("unrealized_pnl")),
+            "pnl_pct": round2(p.get("unrealized_pnl_pct")),
+            "reason": "当前浮盈样本，复盘时判断是方向、择时还是仓位贡献。",
+        }
+        for p in sorted_positions[:5]
+        if safe_float(p.get("unrealized_pnl")) > 0
+    ]
+    top_losers = [
+        {
+            "symbol": p.get("symbol"),
+            "name": p.get("name"),
+            "pnl": round2(p.get("unrealized_pnl")),
+            "pnl_pct": round2(p.get("unrealized_pnl_pct")),
+            "reason": "当前浮亏样本，优先检查是否接近止损、主题走弱或买点过热。",
+        }
+        for p in sorted(account_positions, key=lambda x: safe_float(x.get("unrealized_pnl")))[:5]
+        if safe_float(p.get("unrealized_pnl")) < 0
+    ]
+    position_reviews = [
+        build_position_review(
+            position,
+            top_challenger,
+            headlines,
+            (previous_positions or {}).get(f"{position.get('account_id')}:{position.get('symbol')}") if previous_positions else None,
+        )
+        for position in sorted(account_positions, key=lambda x: (safe_float(x.get("today_pnl_pct")), safe_float(x.get("unrealized_pnl_pct"))))
+    ]
+    review_questions = build_review_questions_from_reviews(position_reviews, top_losers, top_winners)
     return {
         "account_id": account_id,
         "currency": currency,
         "headline": "当前还没有实盘收益曲线样本，先以模拟持仓、已实现盈亏和主题暴露做归因。" if not account_trades else "收益分析已按成交、持仓和主题暴露拆解。",
         "summary": account_analytics.get(account_id) or {},
-        "top_winners": [
-            {
-                "symbol": p.get("symbol"),
-                "name": p.get("name"),
-                "pnl": round2(p.get("unrealized_pnl")),
-                "pnl_pct": round2(p.get("unrealized_pnl_pct")),
-                "reason": "当前浮盈样本，复盘时判断是方向、择时还是仓位贡献。",
-            }
-            for p in sorted_positions[:5]
-            if safe_float(p.get("unrealized_pnl")) > 0
-        ],
-        "top_losers": [
-            {
-                "symbol": p.get("symbol"),
-                "name": p.get("name"),
-                "pnl": round2(p.get("unrealized_pnl")),
-                "pnl_pct": round2(p.get("unrealized_pnl_pct")),
-                "reason": "当前浮亏样本，优先检查是否接近止损、主题走弱或买点过热。",
-            }
-            for p in sorted(account_positions, key=lambda x: safe_float(x.get("unrealized_pnl")))[:5]
-            if safe_float(p.get("unrealized_pnl")) < 0
-        ],
+        "top_winners": top_winners,
+        "top_losers": top_losers,
         "daily_realized": daily_items[:20],
         "theme_attribution": by_theme,
-        "questions": [
+        "position_reviews": position_reviews[:8],
+        "review_questions": review_questions,
+        "questions": review_questions or [
             "今天赚/亏主要来自哪一个主题，而不是哪一只股票的噪音？",
             "浮盈是否已经达到止盈或移动止盈保护条件？",
             "亏损是否来自追高、数据缺失、还是逻辑被证伪后动作不够快？",
@@ -330,9 +578,172 @@ def build_profit_analysis(active_account: dict[str, Any], positions: list[dict[s
     }
 
 
-def build_profit_analysis_by_account(accounts_by_id: dict[str, dict[str, Any]], positions: list[dict[str, Any]], trade_log: list[dict[str, Any]], account_analytics: dict[str, Any]) -> dict[str, Any]:
+def build_position_review(
+    position: dict[str, Any],
+    challenger: dict[str, Any] | None = None,
+    headlines: list[dict[str, Any]] | None = None,
+    previous_position: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    latest = safe_float(position.get("latest_price"))
+    stop_loss = safe_float(position.get("stop_loss"))
+    target_price = safe_float(position.get("target_price"))
+    shares = safe_int(position.get("shares"))
+    pnl_pct = safe_float(position.get("unrealized_pnl_pct"))
+    today_pnl_pct = safe_float(position.get("today_pnl_pct"))
+    market_value = safe_float(position.get("market_value"))
+    support_buffer_pct = round2((latest / stop_loss - 1) * 100) if latest > 0 and stop_loss > 0 else 0.0
+    target_room_pct = round2((target_price / latest - 1) * 100) if latest > 0 and target_price > 0 else 0.0
+    realized_half_now = round2(max(safe_float(position.get("unrealized_pnl")), 0.0) * 0.5)
+    downside_to_stop = round2(max(latest - stop_loss, 0.0) * shares) if latest > 0 and stop_loss > 0 else 0.0
+    action_bias = "继续持有"
+    summary = "当前逻辑尚未明显破坏，继续观察。"
+    what_if = "今天没有明显的必须动作。"
+    lessons: list[str] = []
+
+    if pnl_pct >= 6 and today_pnl_pct < 0:
+        action_bias = "应考虑减仓"
+        summary = "已有较明显浮盈，但今天边际转弱，适合先锁一部分。"
+        what_if = f"如果今天先减半，按现价大约能先锁定 {realized_half_now} 的浮盈。"
+        lessons.extend([
+            f"浮盈 {round2(pnl_pct)}%，已经不是只能死拿的阶段。",
+            f"今日日内表现 {round2(today_pnl_pct)}%，说明强度没有继续单边增强。",
+        ])
+    elif stop_loss > 0 and support_buffer_pct <= 3.0:
+        action_bias = "接近防守位"
+        summary = "价格离止损不远，应该把防守提到第一优先级。"
+        what_if = f"若继续回落到止损，按当前仓位大约还会多回撤 {downside_to_stop}。"
+        lessons.extend([
+            f"距离止损只剩约 {round2(support_buffer_pct)}% 缓冲。",
+            "这类位置继续死扛，性价比通常不高。",
+        ])
+    elif target_room_pct <= 3.0 and pnl_pct > 0:
+        action_bias = "逼近止盈位"
+        summary = "离目标位不远，更适合盯兑现而不是只幻想继续上冲。"
+        what_if = f"若靠近目标位分批落袋，可以优先把已经到手的 {round2(safe_float(position.get('unrealized_pnl')))} 浮盈转成已实现。"
+        lessons.extend([
+            f"距离目标位只剩约 {round2(target_room_pct)}%。",
+            f"当前仓位市值约 {round2(market_value)}，适合提前规划减仓节奏。",
+        ])
+    else:
+        lessons.extend([
+            f"当前浮盈亏 {round2(pnl_pct)}%，今日涨跌 {round2(today_pnl_pct)}%。",
+            f"距离止损缓冲约 {round2(support_buffer_pct)}%，距离目标位空间约 {round2(target_room_pct)}%。",
+        ])
+
+    if challenger:
+        candidate_expected = safe_float(challenger.get("expected_return_pct"))
+        candidate_score = safe_float(challenger.get("committee_score") or challenger.get("score"))
+        current_score = safe_float(position.get("score"))
+        gap_score = round2(candidate_score - current_score)
+        gap_expected = round2(candidate_expected - target_room_pct)
+        if gap_score >= 4 or gap_expected >= 2:
+            lessons.append(
+                f"外部候选 {challenger.get('name')}({challenger.get('symbol')}) 更强：评分高 {gap_score} 分，预期空间多 {gap_expected}%。"
+            )
+            if action_bias == "继续持有":
+                action_bias = "可比较调仓"
+                what_if = f"如果把一部分仓位换去 {challenger.get('name')}，当前账面上可把预期空间从 {round2(target_room_pct)}% 提到 {round2(candidate_expected)}%。"
+
+    related_news = [
+        item
+        for item in (headlines or [])
+        if str(position.get("symbol") or "") in (item.get("related_position_symbols") or [])
+        or any(str(x.get("symbol") or "") == str(position.get("symbol") or "") for x in (item.get("related_positions") or []))
+    ]
+    if related_news:
+        dominant = ((related_news[0].get("news_analysis") or {}).get("final") or {})
+        sentiment = str(dominant.get("sentiment") or "neutral")
+        impact = safe_int(dominant.get("impact_score"), 0)
+        if impact >= 4:
+            lessons.append(f"现实中有高影响新闻命中该股/主题，当前偏{sentiment}，别只盯 K 线。")
+        else:
+            lessons.append("现实中有新闻命中该股/主题，但目前更像辅助线索，先和量价一起验证。")
+        if dominant.get("action_hint"):
+            lessons.append(str(dominant.get("action_hint")))
+
+    changes: list[dict[str, Any]] = []
+    changed_fields = {"stop_loss": False, "target_price": False, "invalidation": False}
+    if previous_position:
+        currency = account_currency(position)
+        previous_stop = round2(previous_position.get("stop_loss"))
+        if previous_stop != round2(stop_loss):
+            changed_fields["stop_loss"] = True
+            changes.append({
+                "field": "stop_loss",
+                "label": "止损",
+                "before": money_text(previous_stop, currency),
+                "after": money_text(stop_loss, currency),
+                "text": f"止损：{money_text(previous_stop, currency)} → {money_text(stop_loss, currency)}",
+            })
+        previous_target = round2(previous_position.get("target_price"))
+        if previous_target != round2(target_price):
+            changed_fields["target_price"] = True
+            changes.append({
+                "field": "target_price",
+                "label": "目标",
+                "before": money_text(previous_target, currency),
+                "after": money_text(target_price, currency),
+                "text": f"目标：{money_text(previous_target, currency)} → {money_text(target_price, currency)}",
+            })
+        previous_invalidation = str(previous_position.get("invalidation") or "").strip()
+        current_invalidation = str(position.get("invalidation") or "").strip()
+        if previous_invalidation and current_invalidation and previous_invalidation != current_invalidation:
+            changed_fields["invalidation"] = True
+            changes.append({
+                "field": "invalidation",
+                "label": "失效条件",
+                "before": previous_invalidation,
+                "after": current_invalidation,
+                "text": f"失效条件已更新：{previous_invalidation} → {current_invalidation}",
+            })
+
     return {
-        account_id: build_profit_analysis(account, positions, trade_log, account_analytics)
+        "symbol": position.get("symbol"),
+        "name": position.get("name"),
+        "action_bias": action_bias,
+        "summary": summary,
+        "what_if": what_if,
+        "lessons": lessons[:5],
+        "support_buffer_pct": round2(support_buffer_pct),
+        "target_room_pct": round2(target_room_pct),
+        "today_pnl_pct": round2(today_pnl_pct),
+        "unrealized_pnl_pct": round2(pnl_pct),
+        "news_hits": [
+            {
+                "title": item.get("title"),
+                "source": item.get("source"),
+                "sentiment": ((item.get("news_analysis") or {}).get("final") or {}).get("sentiment"),
+                "impact_score": ((item.get("news_analysis") or {}).get("final") or {}).get("impact_score"),
+            }
+            for item in related_news[:3]
+        ],
+        "changes": changes,
+        "changed_fields": changed_fields,
+    }
+
+
+def build_review_questions_from_reviews(position_reviews: list[dict[str, Any]], top_losers: list[dict[str, Any]], top_winners: list[dict[str, Any]]) -> list[str]:
+    questions: list[str] = []
+    for item in position_reviews[:4]:
+        questions.append(f"{item.get('name')}：{item.get('what_if')}")
+    for item in top_losers[:2]:
+        questions.append(f"{item.get('name')}：浮亏 {item.get('pnl_pct')}%，复核这是不是买点错误、减仓太慢，还是逻辑本来就不该上。")
+    for item in top_winners[:2]:
+        questions.append(f"{item.get('name')}：浮盈 {item.get('pnl_pct')}%，判断利润主要来自方向判断、持仓耐心，还是卖点还可以更主动。")
+    return questions[:8]
+
+
+def build_profit_analysis_by_account(
+    accounts_by_id: dict[str, dict[str, Any]],
+    positions: list[dict[str, Any]],
+    trade_log: list[dict[str, Any]],
+    account_analytics: dict[str, Any],
+    orders: list[dict[str, Any]] | None = None,
+    headlines: list[dict[str, Any]] | None = None,
+    previous_positions: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        account_id: build_profit_analysis(account, positions, trade_log, account_analytics, orders, headlines, previous_positions)
         for account_id, account in accounts_by_id.items()
     }
 
@@ -343,8 +754,9 @@ def build_thought_process(
     discipline_queue: list[dict[str, Any]],
     risk_flags: dict[str, Any],
     data_health: list[dict[str, Any]],
+    rule_changes: list[dict[str, Any]] | None = None,
+    position_change_lines: list[str] | None = None,
 ) -> dict[str, Any]:
-    bad_sources = [x for x in data_health if not x.get("ok")]
     direct = [x for x in committee.get("candidate_reviews") or [] if x.get("committee_action") == "direct_follow"]
     waiting = [
         x
@@ -352,30 +764,49 @@ def build_thought_process(
         if x.get("committee_action") in {"watch_pullback", "watch_confirm"}
     ]
     avoid = [x for x in committee.get("candidate_reviews") or [] if x.get("committee_action") == "avoid_for_now"]
+
+    stock_focus: list[str] = []
+    for item in direct[:3]:
+        stock_focus.append(
+            f"{item.get('name')}({item.get('symbol')}) 可直接跟随：评分 {round2(item.get('committee_score'))}，"
+            f"预期空间 {round2(item.get('candidate_expected_return_pct') or item.get('expected_return_pct') or 0)}%，"
+            f"执行意见：{((item.get('risk_manager') or {}).get('summary')) or item.get('committee_action')}"
+        )
+    for item in waiting[:3]:
+        stock_focus.append(
+            f"{item.get('name')}({item.get('symbol')}) 暂不追：{((item.get('risk_manager') or {}).get('summary')) or item.get('committee_action')}"
+        )
+    for item in avoid[:2]:
+        stock_focus.append(
+            f"{item.get('name')}({item.get('symbol')}) 先回避：{((item.get('risk_manager') or {}).get('summary')) or item.get('committee_action')}"
+        )
+    for item in discipline_queue[:3]:
+        stock_focus.append(
+            f"持仓 {item.get('name')}({item.get('symbol')}) 当前处理：{item.get('reason')}"
+        )
+
     stages = [
         {
-            "name": "数据可信度",
-            "status": "有降级" if bad_sources else "正常",
-            "summary": f"{len(data_health) - len(bad_sources)}/{len(data_health)} 个数据源可用。",
-            "details": [f"{x.get('source')}：{x.get('message') or '不可用'}" for x in bad_sources[:4]],
-        },
-        {
             "name": "纪律门",
-            "status": "有强制动作" if any(x.get("mandatory") for x in discipline_queue) else "无强制动作",
-            "summary": "先处理止损、止盈、移动止盈和集中度，再看新增买入。",
-            "details": [x.get("reason") for x in discipline_queue if x.get("severity") != "pass"][:5],
+            "status": f"{len([x for x in discipline_queue if x.get('mandatory')])} 个强制检查",
+            "summary": "这里只保留会影响动作的纪律变化，不再展示后台型可信度说明。",
+            "details": [
+                *((position_change_lines or [])[:5]),
+                *[x.get("reason") for x in discipline_queue if x.get("severity") != "pass"][:5],
+            ][:8],
         },
         {
             "name": "组合风险",
-            "status": risk_flags.get("headline"),
-            "summary": "检查现金、单票集中度和主题暴露。",
-            "details": risk_flags.get("risk_flags") or [],
+            "status": f"{len(rule_changes or [])} 项规则调整" if rule_changes else risk_flags.get("headline"),
+            "summary": "如果昨晚复盘改了规则，这里只标真实变动项。",
+            "details": ([x.get("text") for x in (rule_changes or [])] or (risk_flags.get("risk_flags") or []))[:8],
+            "changes": rule_changes or [],
         },
         {
             "name": "候选审议",
             "status": f"直接 {len(direct)} / 等待 {len(waiting)} / 回避 {len(avoid)}",
-            "summary": "候选会经过宏观、主题、技术、赔率、风险、组合和纪律门。",
-            "details": committee.get("summary") or [],
+            "summary": "这里只展示具体股票的进攻、等待和回避理由，不再只给流程话术。",
+            "details": stock_focus[:8] or (committee.get("summary") or []),
         },
         {
             "name": "最终动作",
@@ -395,6 +826,10 @@ def build_thought_process(
                 "action": item.get("committee_action"),
                 "score": item.get("committee_score"),
                 "conviction": item.get("conviction"),
+                "stock_analysis": {
+                    "summary": ((item.get("risk_manager") or {}).get("summary")) or item.get("committee_action"),
+                    "debate": item.get("debate") or [],
+                },
                 "agents": [
                     item.get("macro_agent"),
                     item.get("sector_agent"),
@@ -410,6 +845,7 @@ def build_thought_process(
     return {
         "headline": decision_latest.get("summary") or "等待下一轮有效决策。",
         "stages": stages,
+        "stock_focus": stock_focus[:10],
         "top_reviews": top_reviews,
     }
 
@@ -428,14 +864,12 @@ def build_learning_center(
             "数据源失败要显式展示：不知道就是不知道，不用模板文字补空白。",
             "复盘拆成方向、择时、个股、仓位、卖点，避免只看总盈亏。",
         ],
-        "today_review_questions": profit_analysis.get("questions") or [],
+        "today_review_questions": profit_analysis.get("review_questions") or profit_analysis.get("questions") or [],
+        "position_reviews": profit_analysis.get("position_reviews") or [],
         "risk_lessons": risk_flags.get("risk_flags") or [],
+        "rule_changes": ((thought_process.get("stages") or [{}, {}])[1].get("changes") if len(thought_process.get("stages") or []) > 1 else []) or [],
         "recent_decisions": decision_log[:10],
-        "process_lessons": [
-            f"{stage.get('name')}：{stage.get('summary')}"
-            for stage in thought_process.get("stages") or []
-            if stage.get("summary")
-        ],
+        "process_lessons": [],
     }
 
 
@@ -491,9 +925,8 @@ def build_decision_snapshot(
     hold_items = [x for x in discipline_queue if x.get("action_code") == "hold"][:4]
     wait_orders = [o for o in orders if o.get("committee_action") in {"watch_pullback", "watch_confirm"}][:4]
     direct_orders = [o for o in orders if o.get("committee_action") == "direct_follow"][:3]
-    health_bad = [x for x in data_health if not x.get("ok")]
     if executed_risk:
-        summary = "本轮先执行风险纪律，再考虑新增交易。"
+        summary = "本轮先执行纪律/换仓动作，再考虑新增交易。"
     elif fills:
         summary = "本轮有主动模拟买入，已占用一次交易机会。"
     elif direct_orders:
@@ -501,7 +934,7 @@ def build_decision_snapshot(
     elif wait_orders:
         summary = "本轮主要是等待回踩或确认，没有强行买入。"
     else:
-        summary = "本轮没有足够质量的新增交易，保持观察。"
+        summary = "本轮没有足够质量或赔率显著占优的新增交易，保持观察与等待。"
     return {
         "timestamp": generated_at,
         "date": generated_at[:10],
@@ -511,15 +944,19 @@ def build_decision_snapshot(
         "checks": [
             f"当前阶段：{phase_label(phase)}。",
             f"账户：{account.get('label')}，主动交易机会 {account.get('daily_ops_used', 0)}/{account.get('daily_ops_limit', 4)}。",
-            f"数据健康：{len(data_health) - len(health_bad)}/{len(data_health)} 个源可用。",
         ],
         "why_sell": [x.get("reason") for x in executed_risk],
         "why_buy": [x.get("reason") for x in fills],
         "why_hold": [f"{x.get('name')}：{x.get('reason')}" for x in hold_items],
-        "why_not_buy": [f"{x.get('name')}：{x.get('committee_summary') or x.get('committee_action')}" for x in wait_orders],
+        "why_not_buy": [
+            f"{x.get('name')}({x.get('symbol')})：评分 {round2(x.get('committee_score') or 0)}，"
+            f"预期空间 {round2(x.get('expected_return_pct') or 0)}%，{x.get('committee_summary') or x.get('committee_action')}"
+            for x in wait_orders
+        ],
         "planned_focus": [
-            "先看强制纪律队列，再看 direct_follow 是否仍在计划价附近。",
-            "如果现金低于下限，优先复核是否需要止盈/降仓，而不是继续加仓。",
+            "先看强制纪律与机会成本换仓，再看 direct_follow 是否仍在计划价附近。",
+            "如果现金低于下限，优先复核是否需要止盈/降仓，而不是继续加仓；现金充裕也不代表必须开仓。",
+            "若手里票弱、外面票强，不默认死扛，优先比较机会成本；即使还没到全仓换票，也允许先减一点弱仓腾挪。",
         ],
     }
 
@@ -538,7 +975,7 @@ def build_watch_pool_summary(orders: list[dict[str, Any]]) -> dict[str, Any]:
         "watch_count": len([x for x in orders if x.get("committee_action") in {"watch_pullback", "watch_confirm"}]),
         "cooldown_count": len([x for x in orders if x.get("committee_action") in {"observe_only", "avoid_for_now"}]),
         "max_watch_count": 30,
-        "rotation_policy": "执行池只放 direct_follow；等回踩、等确认、仅观察和回避分层展示，避免所有文字混在一起。",
+        "rotation_policy": "执行池只放 direct_follow；等回踩、等确认、仅观察和回避分层展示。先筛、再比、再动，没优势就不交易。",
     }
 
 
@@ -569,6 +1006,7 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or load_config()
     ensure_sector_summary(config)
     previous_state = load_state()
+    previous_positions = build_previous_position_map(previous_state)
     generated_at = iso_now()
     session_market = resolve_session_market(config)
     phase = current_phase(market=session_market)
@@ -589,6 +1027,10 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
     new_candidates = [c for c in candidates if f"{c.get('account_id')}:{c.get('symbol')}" not in held_keys]
     committee = build_agent_committee_snapshot(new_candidates, accounts_by_id, config)
     orders = merge_reviews_into_orders(new_candidates, committee)
+    rotation_queue = apply_rotation_actions(positions, orders, accounts_by_id, trade_log, generated_at, config, active_markets=active_markets)
+    if rotation_queue:
+        discipline_queue.extend(rotation_queue)
+        recompute_accounts(accounts_by_id, positions, config, trade_log, generated_at)
     fills = apply_entry_orders(positions, orders, accounts_by_id, trade_log, generated_at, phase, config, active_markets=active_markets)
     if fills:
         held_keys = {f"{p.get('account_id')}:{p.get('symbol')}" for p in positions}
@@ -598,11 +1040,28 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
     active_account_id = str(config.get("active_account_id"))
     active_account = accounts_by_id.get(active_account_id) or next(iter(accounts_by_id.values()))
+    rule_change_bundle = build_rule_change_bundle(config, previous_state)
+    mapped_headlines = build_mapped_headlines(market_context.get("headlines") or [], positions, orders)
+    news_pipeline = analyze_mapped_headlines(mapped_headlines, config)
+    mapped_headlines = news_pipeline.get("items") or mapped_headlines
     portfolio_summary = build_portfolio_summary(active_account, positions, orders, config)
     risk_flags = build_risk_flags(accounts_by_id, positions, config)
     account_analytics = build_account_analytics(accounts_by_id, positions, trade_log)
-    profit_analysis_by_account = build_profit_analysis_by_account(accounts_by_id, positions, trade_log, account_analytics)
+    profit_analysis_by_account = build_profit_analysis_by_account(
+        accounts_by_id,
+        positions,
+        trade_log,
+        account_analytics,
+        orders,
+        mapped_headlines,
+        previous_positions,
+    )
     profit_analysis = profit_analysis_by_account.get(str(active_account.get("id"))) or {}
+    position_change_lines = [
+        f"{item.get('name')}({item.get('symbol')})：{change.get('text')}"
+        for item in (profit_analysis.get("position_reviews") or [])
+        for change in (item.get("changes") or [])[:2]
+    ]
     decision_latest = build_decision_snapshot(
         generated_at,
         phase,
@@ -620,8 +1079,11 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         discipline_queue,
         risk_flags,
         market_context.get("data_health") or [],
+        rule_change_bundle.get("changes") or [],
+        position_change_lines,
     )
     learning_center = build_learning_center(decision_log, profit_analysis, risk_flags, thought_process)
+    home_digest = build_home_digest(active_account_id, learning_center, mapped_headlines, news_pipeline.get("summary") or {}, decision_latest, discipline_queue)
 
     state = {
         "meta": {
@@ -632,11 +1094,12 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
             "session_market_label": market_label(session_market),
             "session_phase": phase,
             "session_phase_label": phase_label(phase),
-            "data_source": "A股腾讯实时源/AKShare兼容入口 + Twelve Data/Alpha Vantage/Yahoo Finance/Finnhub/NewsAPI/FRED 环境变量",
+            "data_source": "A股腾讯/AKShare + 海外轻量行情 + 公共 RSS 新闻",
             "schema_version": "stock_lab_new.v1",
             "discipline_first": True,
             "template_text_policy": "前端只渲染状态中真实存在的思考与决策字段，不展示残留模板文字。",
         },
+        "config_snapshot": {"rules": rule_change_bundle.get("rules") or {}},
         "active_account_id": active_account_id,
         "accounts": list(accounts_by_id.values()),
         "account": active_account,
@@ -653,6 +1116,9 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "market_context": {
             "quotes": market_context.get("quotes") or {},
             "headlines": market_context.get("headlines") or [],
+            "mapped_headlines": mapped_headlines,
+            "news_summary": news_pipeline.get("summary") or {},
+            "news_processing": news_pipeline.get("processing") or {},
             "macro": market_context.get("macro") or [],
             "data_health": market_context.get("data_health") or [],
         },
@@ -667,6 +1133,7 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "profit_analysis_by_account": profit_analysis_by_account,
         "thought_process": thought_process,
         "learning_center": learning_center,
+        "home_digest": home_digest,
         "discipline_summary": {
             "mandatory_count": len([x for x in discipline_queue if x.get("mandatory")]),
             "executed_count": len([x for x in discipline_queue if x.get("executed")]),
@@ -712,6 +1179,7 @@ def initial_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
             "session_phase_label": phase_label(current_phase(market=session_market)),
             "schema_version": "stock_lab_new.v1",
         },
+        "config_snapshot": {"rules": build_rule_change_bundle(config, {}).get("rules") or {}},
         "active_account_id": config.get("active_account_id"),
         "accounts": list(accounts_by_id.values()),
         "account": active_account,
@@ -724,6 +1192,8 @@ def initial_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "profit_analysis_by_account": {},
         "thought_process": {"headline": "", "stages": [], "top_reviews": []},
         "learning_center": {"stable_rules": [], "today_review_questions": [], "risk_lessons": [], "recent_decisions": [], "process_lessons": []},
+        "home_digest": {"summary_items": [], "action_lines": [], "headline_hits": [], "headline": ""},
+        "market_context": {"quotes": {}, "headlines": [], "mapped_headlines": [], "news_summary": {}, "news_processing": {"mode": "rule_only", "llm_enabled": False, "llm_used_count": 0, "cache_hit_count": 0, "errors": []}, "macro": [], "data_health": []},
         "decision_latest": {
             "timestamp": generated_at,
             "summary": "",
