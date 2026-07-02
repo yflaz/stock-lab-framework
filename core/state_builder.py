@@ -812,7 +812,13 @@ def build_thought_process(
             "name": "最终动作",
             "status": decision_latest.get("phase_label"),
             "summary": decision_latest.get("summary"),
-            "details": (decision_latest.get("planned_focus") or []) + (decision_latest.get("why_not_buy") or []),
+            "details": (
+                [f"已执行卖出：{x}" for x in (decision_latest.get("why_sell") or [])]
+                + [f"已执行买入：{x}" for x in (decision_latest.get("why_buy") or [])]
+                + (decision_latest.get("why_hold") or [])
+                + (decision_latest.get("why_not_buy") or [])
+                + ((decision_latest.get("planned_focus") or [])[:2] if not decision_latest.get("executed_action_count") else [])
+            )[:10],
         },
     ]
     top_reviews = []
@@ -855,6 +861,7 @@ def build_learning_center(
     profit_analysis: dict[str, Any],
     risk_flags: dict[str, Any],
     thought_process: dict[str, Any],
+    trade_activity: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "stable_rules": [
@@ -868,8 +875,72 @@ def build_learning_center(
         "position_reviews": profit_analysis.get("position_reviews") or [],
         "risk_lessons": risk_flags.get("risk_flags") or [],
         "rule_changes": ((thought_process.get("stages") or [{}, {}])[1].get("changes") if len(thought_process.get("stages") or []) > 1 else []) or [],
+        "today_actions": trade_activity.get("items") or [],
+        "today_action_summary": trade_activity.get("summary_lines") or [],
         "recent_decisions": decision_log[:10],
         "process_lessons": [],
+    }
+
+
+def build_trade_activity(trade_log: list[dict[str, Any]], generated_at: str, active_account_id: str) -> dict[str, Any]:
+    trade_date = str(generated_at or "")[:10]
+    rows = [
+        item
+        for item in trade_log
+        if str(item.get("timestamp") or "")[:10] == trade_date
+        and str(item.get("account_id") or "") == active_account_id
+    ]
+    rows.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    normalized = []
+    for item in rows:
+        side = str(item.get("type") or "").lower()
+        is_discipline = bool(item.get("discipline_action"))
+        if side == "reduce" and is_discipline:
+            action_label = "纪律减仓"
+        elif side == "sell" and is_discipline:
+            action_label = "纪律卖出"
+        elif side == "sell":
+            action_label = "卖出"
+        elif side == "buy":
+            action_label = "主动买入"
+        else:
+            action_label = side or "动作"
+        normalized.append(
+            {
+                "timestamp": item.get("timestamp"),
+                "symbol": item.get("symbol"),
+                "name": item.get("name"),
+                "type": side,
+                "action_label": action_label,
+                "shares": safe_int(item.get("shares")),
+                "price": round2(item.get("price")),
+                "amount": round2(item.get("amount") or (safe_int(item.get("shares")) * safe_float(item.get("price")))),
+                "reason": item.get("reason") or "",
+                "discipline_action": is_discipline,
+                "counts_against_daily_limit": item.get("counts_against_daily_limit") is not False,
+                "opportunity_label": item.get("opportunity_label") or "",
+                "risk_note": item.get("risk_note") or "",
+            }
+        )
+    discipline_count = sum(1 for item in normalized if item.get("discipline_action"))
+    active_buy_count = sum(1 for item in normalized if item.get("type") == "buy")
+    active_sell_count = sum(1 for item in normalized if item.get("type") == "sell" and not item.get("discipline_action"))
+    summary_lines = []
+    if discipline_count:
+        summary_lines.append(f"今天已执行 {discipline_count} 笔纪律动作；这些会改变持仓，但不占用主动交易机会。")
+    if active_buy_count:
+        summary_lines.append(f"今天有 {active_buy_count} 笔主动买入，才会计入 0/4 这类交易机会额度。")
+    if active_sell_count:
+        summary_lines.append(f"今天还有 {active_sell_count} 笔非纪律卖出/腾挪动作。")
+    if not summary_lines:
+        summary_lines.append("今天还没有发生实际成交动作。")
+    return {
+        "trade_date": trade_date,
+        "discipline_count": discipline_count,
+        "active_buy_count": active_buy_count,
+        "active_sell_count": active_sell_count,
+        "items": normalized,
+        "summary_lines": summary_lines,
     }
 
 
@@ -958,6 +1029,7 @@ def build_decision_snapshot(
             "如果现金低于下限，优先复核是否需要止盈/降仓，而不是继续加仓；现金充裕也不代表必须开仓。",
             "若手里票弱、外面票强，不默认死扛，优先比较机会成本；即使还没到全仓换票，也允许先减一点弱仓腾挪。",
         ],
+        "executed_action_count": len(executed_risk) + len(fills),
     }
 
 
@@ -1073,6 +1145,7 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         active_account,
     )
     decision_log = append_decision_log(previous_state, decision_latest)
+    trade_activity = build_trade_activity(trade_log, generated_at, str(active_account.get("id")))
     thought_process = build_thought_process(
         decision_latest,
         committee,
@@ -1082,7 +1155,7 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         rule_change_bundle.get("changes") or [],
         position_change_lines,
     )
-    learning_center = build_learning_center(decision_log, profit_analysis, risk_flags, thought_process)
+    learning_center = build_learning_center(decision_log, profit_analysis, risk_flags, thought_process, trade_activity)
     home_digest = build_home_digest(active_account_id, learning_center, mapped_headlines, news_pipeline.get("summary") or {}, decision_latest, discipline_queue)
 
     state = {
@@ -1142,6 +1215,7 @@ def build_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "positions": positions,
         "orders": orders,
         "trade_log": trade_log,
+        "trade_activity": trade_activity,
         "decision_latest": decision_latest,
         "decision_log": decision_log,
         "watchlists": config.get("watchlists") or {},
@@ -1186,12 +1260,13 @@ def initial_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "positions": [],
         "orders": [],
         "trade_log": [],
+        "trade_activity": {"trade_date": generated_at[:10], "items": [], "summary_lines": [], "discipline_count": 0, "active_buy_count": 0, "active_sell_count": 0},
         "decision_log": [],
         "account_analytics": {},
         "profit_analysis": {},
         "profit_analysis_by_account": {},
         "thought_process": {"headline": "", "stages": [], "top_reviews": []},
-        "learning_center": {"stable_rules": [], "today_review_questions": [], "risk_lessons": [], "recent_decisions": [], "process_lessons": []},
+        "learning_center": {"stable_rules": [], "today_review_questions": [], "risk_lessons": [], "today_actions": [], "today_action_summary": [], "recent_decisions": [], "process_lessons": []},
         "home_digest": {"summary_items": [], "action_lines": [], "headline_hits": [], "headline": ""},
         "market_context": {"quotes": {}, "headlines": [], "mapped_headlines": [], "news_summary": {}, "news_processing": {"mode": "rule_only", "llm_enabled": False, "llm_used_count": 0, "cache_hit_count": 0, "errors": []}, "macro": [], "data_health": []},
         "decision_latest": {

@@ -331,11 +331,14 @@ function agentName(agent) {
 
 function renderLearning() {
   const learning = STATE.learning_center || {};
+  const tradeActivity = STATE.trade_activity || {};
+  const todayActions = learning.today_actions || tradeActivity.items || [];
+  const actionSummary = learning.today_action_summary || tradeActivity.summary_lines || [];
   return [
     learning.rule_changes?.length ? card("今天改过的规则", "跟昨天不一样才标红", tag(`${learning.rule_changes.length} 项`, "good"), changeList(learning.rule_changes.map((x) => x.text || x))) : "",
-    card("稳定规则", "", tag(`${(learning.stable_rules || []).length} 条`, "info"), list(learning.stable_rules)),
+    todayActions.length ? `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">今日实际动作</div><div class="section-sub">这里显示真实成交，不再只写阶段摘要</div></div>${tag(`${todayActions.length} 笔`, "warn")}</div>${actionSummary.length ? `<div class="stock-note">${list(actionSummary)}</div>` : ""}</div>${todayActions.slice(0, 12).map((a) => `<div class="stock-card"><div class="stock-head"><div><div class="stock-name">${a.name || a.symbol} · ${a.action_label || a.type || "动作"}</div><div class="stock-code">${a.timestamp || ""} · ${a.symbol || ""}</div></div>${tag(a.counts_against_daily_limit ? (a.opportunity_label || "计入机会") : "不计入 0/4", a.counts_against_daily_limit ? "info" : "good")}</div><div class="stock-note">${a.shares || 0} 股 @ ${money(a.price)} · 金额 ${money(a.amount)}${a.reason ? `<br>${a.reason}` : ""}${a.risk_note ? `<br>${a.risk_note}` : ""}</div></div>`).join("")}</section>` : card("今日实际动作", "", tag("0 笔", "info"), list(actionSummary.length ? actionSummary : ["今天还没有发生实际成交动作。"])) ,
     card("复盘问题", "", tag("Review", "warn"), list(learning.today_review_questions)),
-    `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">最近记录</div></div>${tag(`${(learning.recent_decisions || []).length} 条`)}</div></div>${(learning.recent_decisions || []).slice(0, 10).map((d) => `<div class="stock-card"><div class="stock-head"><div><div class="stock-name">${d.phase_label || d.phase}</div><div class="stock-code">${d.timestamp || ""}</div></div>${tag(d.date || "")}</div><div class="stock-note">${d.summary || ""}</div></div>`).join("")}</section>`,
+    `<section class="card"><div class="card-pad"><div class="section-head"><div><div class="section-title">最近记录</div><div class="section-sub">保留每轮结论，但动作以“今日实际动作”为准</div></div>${tag(`${(learning.recent_decisions || []).length} 条`)}</div></div>${(learning.recent_decisions || []).slice(0, 10).map((d) => `<div class="stock-card"><div class="stock-head"><div><div class="stock-name">${d.phase_label || d.phase}</div><div class="stock-code">${d.timestamp || ""}</div></div>${tag(d.executed_action_count ? `已执行 ${d.executed_action_count} 笔` : (d.date || ""), d.executed_action_count ? "warn" : "info")}</div><div class="stock-note">${d.summary || ""}${(d.why_sell?.length || d.why_buy?.length) ? `${list([...(d.why_sell || []).map((x) => `卖出：${x}`), ...(d.why_buy || []).map((x) => `买入：${x}`)])}` : ""}</div></div>`).join("")}</section>`,
   ].join("");
 }
 
