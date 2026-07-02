@@ -55,8 +55,8 @@ class StateContractTests(unittest.TestCase):
                 {
                     "timestamp": "2026-07-02T09:31:00+08:00",
                     "account_id": "a-share-paper",
-                    "symbol": "000100",
-                    "name": "TCL科技",
+                    "symbol": "123456",
+                    "name": "示例科技A",
                     "type": "reduce",
                     "shares": 100,
                     "price": 5.73,
@@ -68,8 +68,8 @@ class StateContractTests(unittest.TestCase):
                 {
                     "timestamp": "2026-07-02T09:57:00+08:00",
                     "account_id": "a-share-paper",
-                    "symbol": "600378",
-                    "name": "昊华科技",
+                    "symbol": "654321",
+                    "name": "示例科技B",
                     "type": "buy",
                     "shares": 100,
                     "price": 83.85,
